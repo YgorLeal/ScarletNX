@@ -2,6 +2,14 @@
 <!-- Copyright 2026 the ScarletNX contributors -->
 # GUI launcher
 
+## Index
+
+* [Games: the games of games/ and the player's folders](#games-the-games-of-games-and-the-players-folders)
+* [Output and resource use](#output-and-resource-use)
+* [Themes](#themes)
+  * [Theme formats](#theme-formats)
+* [Building and testing](#building-and-testing)
+
 `scarletnx` started with no arguments (or a model's name, or the AppImage), with no game of its
 name beside it, opens its launcher: a small SDL3 menu for the command-line drivers. A copy named
 after a game, without its code, says so and never opens it. It uses an
