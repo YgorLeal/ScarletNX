@@ -103,8 +103,8 @@ int ipc_warn_once(const char* name, u32 cmd) {
         u32 cmd, cnt;
     } t[512];
     static int nt;
-    static char lk;
-    while (__atomic_test_and_set(&lk, __ATOMIC_ACQUIRE)) plat_yield();
+    static PMutex lk = PMUTEX_INIT;
+    pm_lock(&lk);
     int r = 1, i = 0;
     for (; i < nt; i++)
         if (t[i].cmd == cmd && !strncmp(t[i].n, name, sizeof t[i].n - 1)) {
@@ -117,7 +117,7 @@ int ipc_warn_once(const char* name, u32 cmd) {
         t[nt].cnt = 1;
         nt++;
     }
-    __atomic_clear(&lk, __ATOMIC_RELEASE);
+    pm_unlock(&lk);
     return r;
 }
 /* "undeclared", not "stub": a declared @stub is silent, and this success carries none of the command's outputs, so a

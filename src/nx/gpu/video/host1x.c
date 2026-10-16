@@ -24,17 +24,7 @@ typedef struct {
 #define IOVA_GUARD 0x10000ull
 static IoMap g_iom[1024];
 static int g_niom;
-static PMutex g_hlk;
-static int g_hinit; /* 0, 1 while pm_init runs, 2 ready: nvmap's FREE can get here first, from any thread */
-static void h_init(void) {
-    int s = 0;
-    if (__atomic_load_n(&g_hinit, __ATOMIC_ACQUIRE) == 2) return;
-    if (__atomic_compare_exchange_n(&g_hinit, &s, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        pm_init(&g_hlk);
-        __atomic_store_n(&g_hinit, 2, __ATOMIC_RELEASE);
-    } else
-        while (__atomic_load_n(&g_hinit, __ATOMIC_ACQUIRE) != 2) plat_yield();
-}
+static PMutex g_hlk = PMUTEX_INIT; /* static: nvmap's FREE can get here before any channel opens, from any thread */
 static u64 iova_span(u32 size) { return (((u64)size + 0xFFFFu) & ~0xFFFFull) + IOVA_GUARD; }
 static u32 iova_map(u32 h) {
     u64 a = nvmap_addr(h);
@@ -71,7 +61,6 @@ static u32 iova_map(u32 h) {
     return (u32)base;
 }
 void host1x_forget_handle(u32 h) {
-    h_init();
     pm_lock(&g_hlk);
     int k = 0;
     for (int i = 0; i < g_niom; i++)
@@ -164,7 +153,6 @@ static void run_words(H1Ch* ch, const u32* w, u32 n) {
 
 /* ------------------------------------------------------------ channel ioctls */
 void* host1x_open(int is_vic) {
-    h_init();
     H1Ch* ch = calloc(1, sizeof *ch);
     if (!ch) return NULL;
     ch->is_vic = is_vic;
@@ -177,7 +165,6 @@ void* host1x_open(int is_vic) {
 void host1x_close(void* p) {
     H1Ch* ch = p;
     if (!ch) return;
-    h_init();
     pm_lock(&g_hlk);
     for (int i = 0; i < H1_NSYNCPT; i++)
         if (ch->syncpt[i]) syncpt_free(ch->syncpt[i]);
@@ -196,7 +183,6 @@ u32 host1x_ioctl(void* p, u32 cmd, u8* d, u32 n) {
     H1Ch* ch = p;
     if (!ch) return 4; /* BadParameter */
     int is_vic = ch->is_vic;
-    h_init();
     pm_lock(&g_hlk);
     u32 r = 0, grp = (cmd >> 8) & 0xFF, nr = cmd & 0xFF;
     if (grp == 0x48) { /* SET_NVMAP_FD etc */

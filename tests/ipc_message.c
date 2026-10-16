@@ -25,7 +25,6 @@ static int test_log; /* SNX_TEST_LOG=1 prints what ipc.c logs */
 void pm_init(PMutex* m) { (void)m; }
 void pm_lock(PMutex* m) { (void)m; }
 void pm_unlock(PMutex* m) { (void)m; }
-void plat_yield(void) {}
 void logf_(int level, const char* format, ...) {
     (void)level;
     if (!test_log) return;
