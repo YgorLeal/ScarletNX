@@ -14,6 +14,7 @@
 #include "nx/runtime/platform/plat.h"
 #include "nx/runtime/platform/unattended.h"
 #include "nx/runtime/platform/overlay.h"
+#include "nx/runtime/platform/fatal_screen.h"
 #include "nx/runtime/platform/touch.h"
 #include "nx/runtime/platform/ui.h"
 #include "nx/runtime/platform/vpad.h"
@@ -400,6 +401,13 @@ static int fatal_screen(const char* msg) {
     static SnxUiQuad quads[1024];
     SnxUiList l = {quads, 0, 1024};
     char name[256], what[1400];
+    const char* log = NULL;
+    SnxOverlayRect link = {0, 0, 0, 0};
+#ifndef __ANDROID__
+    char log_path[1200], log_url[3608];
+    int on_link = 0, pointer = 0;
+    SDL_FingerID finger = 0;
+#endif
     SDL_Renderer* r;
     SDL_Texture* atlas = NULL;
     const u32* px;
@@ -438,12 +446,18 @@ static int fatal_screen(const char* msg) {
 #ifdef __ANDROID__
     snprintf(what, sizeof what, "%s", how);
 #else
-    snprintf(what, sizeof what, "%s%s%s.log", how, g_exedir, g_exename);
+    /* Match plat.c: installed builds write logs in their state folder. */
+    snprintf(what, sizeof what, "%s", how);
+    snprintf(log_path, sizeof log_path, "%s%s.log", g_statedir, g_exename);
+    if (fatal_log_url(log_path, log_url, sizeof log_url)) log = log_path;
 #endif
     since = SDL_GetTicks();
     while (!done) {
         SDL_Event e;
         int w = 0, h = 0;
+        SDL_GetRenderOutputSize(r, &w, &h);
+        l.n = 0;
+        overlay_error_draw(&l, w, h, name, msg, what, log, &link);
         while (SDL_PollEvent(&e)) switch (e.type) {
                 case SDL_EVENT_QUIT:
                 case SDL_EVENT_WINDOW_CLOSE_REQUESTED: done = 1; break;
@@ -451,18 +465,58 @@ static int fatal_screen(const char* msg) {
                 case SDL_EVENT_KEY_DOWN:
                     if (!e.key.repeat && SDL_GetTicks() - since > 500) done = 1;
                     break;
+#ifndef __ANDROID__
+                case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+                    float x, y;
+                    if (e.button.which == SDL_TOUCH_MOUSEID || e.button.button != SDL_BUTTON_LEFT || pointer) break;
+                    if (!SDL_RenderCoordinatesFromWindow(r, e.button.x, e.button.y, &x, &y)) break;
+                    pointer = 1;
+                    on_link = overlay_error_link(&link, x, y);
+                    break;
+                }
+                case SDL_EVENT_FINGER_DOWN:
+                    if (!pointer) {
+                        pointer = 2;
+                        finger = e.tfinger.fingerID;
+                        on_link = overlay_error_link(&link, e.tfinger.x * (float)w, e.tfinger.y * (float)h);
+                    }
+                    break;
+                case SDL_EVENT_MOUSE_BUTTON_UP:
+                case SDL_EVENT_FINGER_UP: {
+                    float x, y;
+                    int hit;
+                    if (e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                        if (pointer != 1 || e.button.which == SDL_TOUCH_MOUSEID || e.button.button != SDL_BUTTON_LEFT)
+                            break;
+                        hit = SDL_RenderCoordinatesFromWindow(r, e.button.x, e.button.y, &x, &y) &&
+                              overlay_error_link(&link, x, y);
+                    } else {
+                        if (pointer != 2 || e.tfinger.fingerID != finger) break;
+                        hit = overlay_error_link(&link, e.tfinger.x * (float)w, e.tfinger.y * (float)h);
+                    }
+                    if (on_link) {
+                        if (hit && !SDL_OpenURL(log_url)) LOG("video: could not open the log: %s\n", SDL_GetError());
+                    } else
+                        done = 1;
+                    pointer = on_link = 0;
+                    break;
+                }
+                case SDL_EVENT_FINGER_CANCELED:
+                    if (pointer == 2 && e.tfinger.fingerID == finger) pointer = on_link = 0;
+                    break;
+#else
                 case SDL_EVENT_FINGER_DOWN:
                 case SDL_EVENT_MOUSE_BUTTON_DOWN:
+#endif
                 case SDL_EVENT_GAMEPAD_BUTTON_DOWN: pressed = 1; break;
+#ifdef __ANDROID__
                 case SDL_EVENT_FINGER_UP:
                 case SDL_EVENT_MOUSE_BUTTON_UP:
+#endif
                 case SDL_EVENT_GAMEPAD_BUTTON_UP:
                     if (pressed) done = 1;
                     break;
             }
-        SDL_GetRenderOutputSize(r, &w, &h);
-        l.n = 0;
-        overlay_error_draw(&l, w, h, name, msg, what);
         /* where the game's picture was: the device that drew it may be gone */
         SDL_SetRenderDrawColor(r, 0x14, 0x14, 0x16, 255);
         SDL_RenderClear(r);

@@ -15,4 +15,8 @@ const char* fatal_hint(const char* msg);
 int fatal_wrap(const char* text, int cols, char (*rows)[FATAL_ROW], int max);
 /* text in the font's bytes (CP437, gui_glyph), for ui_text: what the font lacks becomes '?' */
 void fatal_cp437(const char* text, char* out, size_t size);
+/* An absolute desktop log path as a file URI, with reserved and UTF-8 bytes
+   percent encoded. Returns 0, leaving an empty string, if it will not fit or
+   the path is relative. Windows drive and UNC paths use forward slashes. */
+int fatal_log_url(const char* path, char* out, size_t size);
 #endif

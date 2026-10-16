@@ -291,6 +291,11 @@ the pace `fps_limit` sets.
 In the game's menu the arrows, Enter and Escape move, select and go back; a gamepad's D-pad or left stick, A and
 B do the same, the on-screen controls' too, and a direction held goes on after a moment.
 
+On the desktop, the stopped-game panel underlines the game's log path. Click or
+tap it to ask the system's viewer to open the file while keeping the panel open.
+The path follows the game's state folder, including an installed build's XDG
+state folder on Linux. On Android, use the launcher's **Share log** instead.
+
 ### On-screen controls
 
 A pad drawn over the game, with rEden's buttons and sizes, laid out as the console's two controllers hold them:

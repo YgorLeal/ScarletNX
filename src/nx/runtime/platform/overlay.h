@@ -42,6 +42,13 @@ int overlay_tap(float x, float y, int sw, int sh);
 void overlay_draw(SnxUiList* l, int sw, int sh);
 /* a fatal error's panel (backend/sdl3.c), the menu's own: the head, the game's name, the error, what it means and what to
    do, cut to its width, and Close in focus */
-void overlay_error_draw(SnxUiList* l, int sw, int sh, const char* name, const char* msg, const char* how);
+typedef struct {
+    float x, y, w, h;
+} SnxOverlayRect;
+/* log and link may be NULL. A visible log is underlined and its bounds returned
+   in link. A hidden or absent log returns an empty rectangle. */
+void overlay_error_draw(SnxUiList* l, int sw, int sh, const char* name, const char* msg, const char* how,
+                        const char* log, SnxOverlayRect* link);
+int overlay_error_link(const SnxOverlayRect* link, float x, float y);
 
 #endif

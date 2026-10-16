@@ -3,6 +3,7 @@
 /* The game's menu (runtime/platform/overlay.c): where it goes, its pages, what a tap, a move or a step does, its look;
    and ui.c's atlas and text */
 #include "nx/runtime/platform/overlay.h"
+#include "nx/runtime/platform/fatal_screen.h"
 #include "nx/runtime/platform/backend.h"
 #include "nx/runtime/platform/gamepad.h"
 #include "nx/runtime/platform/vpad.h"
@@ -408,7 +409,7 @@ int main(void) {
         int total, i, close_band = -1;
         list.n = 0;
         overlay_error_draw(&list, SW, SH, "ENDER MAGNOLIA", "vulkan: the GPU device was lost (driver reset or crash)",
-                           "The menu's Share log sends the game's log, which has what ran last.");
+                           "The menu's Share log sends the game's log, which has what ran last.", NULL, NULL);
         overlay_place(SW, SH, &px, &py, &s);
         row_h = 16.0f * (float)s;
         top = list.q[0].y;
@@ -426,15 +427,59 @@ int main(void) {
                 close_band = i;
         assert(close_band >= 0 && text_at(1, total - 2, "\xFE Close"));
         list.n = 0;
-        overlay_error_draw(&list, SW, SH, "CAF\xC3\x89", "x", "y");
+        overlay_error_draw(&list, SW, SH, "CAF\xC3\x89", "x", "y", NULL, NULL);
         py = (int)list.q[0].y;
         assert(text_at(1, 1, "CAF\x90"));
         list.n = 0;
         overlay_error_draw(
             &list, SW, 200, "N", "message",
             "a b c d e f g h i j k l m n o p q r s t u v w x y z a b c d e f g h i j k l m n o p q r s t u "
-            "v w x y z a b c d e f g h i j k l m n o p q r s t u v w x y z");
+            "v w x y z a b c d e f g h i j k l m n o p q r s t u v w x y z",
+            NULL, NULL);
         assert(list.q[0].y >= 0 && list.q[0].y + list.q[0].h <= 200.0f);
+    }
+    /* Only visible log rows are a link. Wrapped paths remain one target, and a
+       short screen that hides the path leaves no invisible click target. */
+    {
+        SnxOverlayRect link;
+        int i, underlines = 0;
+        const char* path = "/home/player/.local/state/scarletnx/A game with a long name.log";
+        list.n = 0;
+        overlay_error_draw(&list, SW, SH, "GAME", "message", "The game's log:", path, &link);
+        assert(link.w > 0 && link.h >= 16.0f * (float)s);
+        assert(overlay_error_link(&link, link.x, link.y));
+        assert(overlay_error_link(&link, link.x + link.w - 1, link.y + link.h - 1));
+        assert(!overlay_error_link(&link, link.x - 1, link.y));
+        assert(!overlay_error_link(&link, link.x + link.w, link.y));
+        assert(!overlay_error_link(&link, link.x, link.y + link.h));
+        for (i = 0; i < list.n; ++i)
+            if (list.q[i].x == link.x && list.q[i].h == (float)s && list.q[i].w > 0 && list.q[i].y >= link.y &&
+                list.q[i].y < link.y + link.h)
+                ++underlines;
+        assert(underlines == (int)(link.h / (16.0f * (float)s)));
+        list.n = 0;
+        overlay_error_draw(&list, SW, 160, "GAME", "message", "The game's log:", path, &link);
+        assert(!overlay_error_link(&link, link.x, link.y) && !link.h);
+        list.n = 0;
+        overlay_error_draw(&list, SW, SH, "GAME", "message", "Share log", NULL, &link);
+        assert(!link.w && !link.h && !overlay_error_link(NULL, 0, 0));
+    }
+    {
+        char url[256];
+        assert(fatal_log_url("/tmp/a b#c%?.log", url, sizeof url));
+        assert(!strcmp(url, "file:///tmp/a%20b%23c%25%3F.log"));
+        assert(fatal_log_url("C:\\games\\a b.log", url, sizeof url));
+        assert(!strcmp(url, "file:///C:/games/a%20b.log"));
+        assert(fatal_log_url("\\\\server\\share\\a.log", url, sizeof url));
+        assert(!strcmp(url, "file://server/share/a.log"));
+        assert(fatal_log_url("/tmp/caf\xC3\xA9\\x.log", url, sizeof url));
+        assert(!strcmp(url, "file:///tmp/caf%C3%A9%5Cx.log"));
+        assert(!fatal_log_url("relative.log", url, sizeof url) && !*url);
+        assert(!fatal_log_url("https://example.org", url, sizeof url) && !*url);
+        assert(!fatal_log_url("/tmp/a.log", url, 8) && !*url);
+        assert(!fatal_log_url(NULL, url, sizeof url) && !*url);
+        assert(!fatal_log_url("", url, sizeof url) && !*url);
+        assert(!fatal_log_url("/tmp/a.log", NULL, 0));
     }
     puts("overlay: placing, pages, taps, keys, values, scrolling, look, the error's panel and the atlas passed");
     return 0;

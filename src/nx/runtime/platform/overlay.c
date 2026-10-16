@@ -411,14 +411,20 @@ void overlay_draw(SnxUiList* l, int sw, int sh) {
     if (top + VISIBLE < n)
         ui_text(l, (float)px + cw * (OVERLAY_COLS - 1), (float)py + ch * (FIRST + VISIBLE - 1), s, "\x19", SOFT);
 }
-void overlay_error_draw(SnxUiList* l, int sw, int sh, const char* name, const char* msg, const char* how) {
-    enum { PARAS = 4, LINES = 12 };
+int overlay_error_link(const SnxOverlayRect* link, float x, float y) {
+    return link && link->w > 0 && link->h > 0 && x >= link->x && x < link->x + link->w && y >= link->y &&
+           y < link->y + link->h;
+}
+void overlay_error_draw(SnxUiList* l, int sw, int sh, const char* name, const char* msg, const char* how,
+                        const char* log, SnxOverlayRect* link) {
+    enum { PARAS = 5, LINES = 12 };
     static char rows_of[PARAS][LINES][FATAL_ROW];
-    const char* text[PARAS] = {name, msg, fatal_hint(msg), how};
-    const u32 color[PARAS] = {SOFT, FAILURE, INK, SOFT};
+    const char* text[PARAS] = {name, msg, fatal_hint(msg), how, log};
+    const u32 color[PARAS] = {SOFT, FAILURE, INK, SOFT, INK};
     char line[OVERLAY_COLS + 4];
     int px, py, s, n[PARAS], k, i, total, room, row;
     float cw, ch, x, y;
+    if (link) memset(link, 0, sizeof *link);
     overlay_place(sw, sh, &px, &py, &s);
     cw = 8.0f * (float)s;
     ch = 16.0f * (float)s;
@@ -442,8 +448,20 @@ void overlay_error_draw(SnxUiList* l, int sw, int sh, const char* name, const ch
     for (k = 0; k < PARAS; ++k) {
         if (k > 0 && n[k]) ++row;
         for (i = 0; i < n[k] && i < LINES; ++i, ++row) {
+            float width;
             fatal_cp437(rows_of[k][i], line, sizeof line);
-            ui_text(l, x + cw, y + ch * (float)row, s, line, color[k]);
+            width = ui_text(l, x + cw, y + ch * (float)row, s, line, color[k]);
+            if (k == PARAS - 1 && width > 0) {
+                ui_fill(l, x + cw, y + ch * (float)(row + 1) - (float)s, width, (float)s, color[k]);
+                if (link) {
+                    if (!link->h) {
+                        link->x = x + cw;
+                        link->y = y + ch * (float)row;
+                    }
+                    if (width > link->w) link->w = width;
+                    link->h += ch;
+                }
+            }
         }
     }
     row = total - 2;

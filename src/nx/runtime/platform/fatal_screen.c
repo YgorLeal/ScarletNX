@@ -4,6 +4,44 @@
 #include "common/utilities/font.h"
 #include <string.h>
 
+int fatal_log_url(const char* path, char* out, size_t size) {
+    static const char hex[] = "0123456789ABCDEF";
+    const char* prefix;
+    size_t n, i;
+    int drive, unc;
+    if (!size) return 0;
+    out[0] = 0;
+    if (!path || !*path) return 0;
+    drive = ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':' &&
+            (path[2] == '/' || path[2] == '\\');
+    unc = path[0] == '\\' && path[1] == '\\';
+    if (!drive && !unc && path[0] != '/') return 0;
+    prefix = drive ? "file:///" : unc ? "file:" : "file://";
+    n = strlen(prefix);
+    if (n >= size) return 0;
+    memcpy(out, prefix, n);
+    for (i = 0; path[i]; ++i) {
+        unsigned char c = (unsigned char)path[i];
+        int plain;
+        if ((drive || unc) && c == '\\') c = '/';
+        plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || strchr("-._~/", c) ||
+                (drive && i == 1 && c == ':');
+        if (size - n <= (plain ? 1u : 3u)) {
+            out[0] = 0;
+            return 0;
+        }
+        if (plain)
+            out[n++] = (char)c;
+        else {
+            out[n++] = '%';
+            out[n++] = hex[c >> 4];
+            out[n++] = hex[c & 15];
+        }
+    }
+    out[n] = 0;
+    return 1;
+}
+
 const char* fatal_hint(const char* msg) {
     if (strstr(msg, "GPU device was lost"))
         return "The GPU stopped answering and its driver reset it: something the game gave it, a shader or a draw, "
