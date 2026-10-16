@@ -34,34 +34,6 @@ int g_opt_prof = 0;
 int g_opt_network = 0;
 /* the variables above hold until ini_open, which applies the file's values, or the tables' defaults for keys it
    lacks (the logging before it needs g_verbose's) */
-/* options that went with the OpenGL renderer (renderer choice, its dynamic resolution, LSFG, the F7 recorder) and
-   older ones: dropped on load, so the rewritten .ini loses them. game_dynamic_resolution worked through GPU timings
-   the OpenGL renderer's thread measured. vsync is a setting again (the Vulkan swapchain's present mode) */
-static const char* const INI_REMOVED[] = {"audio_device", /* Playback now always follows the system default. */
-                                          "renderer",
-                                          "dynamic_resolution",
-                                          "dynamic_resolution_min",
-                                          "game_dynamic_resolution",
-                                          "low_priority_shader_compiler",
-                                          "forced_vsync",
-                                          "smooth_recording",
-                                          "recording_fps",
-                                          "lsfg",
-                                          "lsfg_dll",
-                                          "lsfg_target",
-                                          "lsfg_multiplier",
-                                          "lsfg_flow",
-                                          "lsfg_resolution",
-                                          "lossless_scaling",
-                                          "lossless_path",
-                                          "touch_controls",
-                                          "touch_controls_opacity",
-                                          NULL};
-static int ini_removed(const char* k) {
-    for (int i = 0; INI_REMOVED[i]; i++)
-        if (!strcmp(k, INI_REMOVED[i])) return 1;
-    return 0;
-}
 /* everything we read, so the rewrite keeps unknown keys. A value is under INI_LINE bytes */
 #define INI_MAXK 128
 #define INI_LINE 2048
@@ -290,8 +262,8 @@ static int ini_load(const char* path) {
                        path, k, INI_LINE - 1);
             continue;
         }
-        if (ini_removed(k)) continue;
         ini_store(k, v);
+        if (ini_deprecated(k)) continue; /* kept to show, never applied */
         if (!ini_overridden(k)) ini_apply(k, v);
     }
     free(text);
@@ -372,14 +344,21 @@ static int ini_write(void) {
                 if (v) fprintf(f, "%s=%s\n", o->key, v);
             }
     }
-    int other = 0;
+    int other = 0, deprecated = 0;
     for (int i = 0; i < g_ini_n; i++)
-        if (!ini_known(g_ini_k[i], NULL)) {
+        if (!ini_known(g_ini_k[i], NULL) && !ini_deprecated(g_ini_k[i])) {
             if (!other) {
                 fprintf(f, "\n[Other]\n");
                 other = 1;
             }
             fprintf(f, "%s=%s\n", g_ini_k[i], g_ini_v[i]);
+        }
+    /* last, so the launcher's Clean old settings takes the section to the end of the file */
+    for (int i = 0; i < g_ini_n; i++)
+        if (ini_deprecated(g_ini_k[i])) {
+            if (!deprecated) ini_deprecated_head(f);
+            deprecated = 1;
+            ini_deprecated_key(f, g_ini_k[i], g_ini_v[i]);
         }
     /* the old file stays until the new one replaces it: a failure or a kill in between keeps the player's settings.
        plat_replace_file removes tmp when it fails */
@@ -405,6 +384,15 @@ void ini_set(const char* k, const char* v) {
     snprintf(g_set_v[i], sizeof g_set_v[i], "%s", v);
     if (i == g_set_n) g_set_n++;
 }
+/* the deprecated keys the file has, said once a run where the player reads */
+static void ini_say_deprecated(const char* path) {
+    const char* keys[INI_MAXK];
+    char note[1024];
+    int n = 0;
+    for (int i = 0; i < g_ini_n; i++)
+        if (ini_deprecated(g_ini_k[i])) keys[n++] = g_ini_k[i];
+    if (ini_deprecated_note(note, sizeof note, path, keys, n)) WARN("%s\n", note);
+}
 void ini_open(const char* path) {
     snprintf(g_ini_path, sizeof g_ini_path, "%s", path);
     int missing = ini_load(path) && errno == ENOENT, unreadable = !missing && file_hash(path, &g_ini_hash);
@@ -414,8 +402,10 @@ void ini_open(const char* path) {
             WARN("settings: --%s is not a setting, so it does nothing\n", g_ovr_k[i]);
     if (unreadable) /* it would be replaced by defaults: left as it is */
         WARN("settings: %s could not be read, so the defaults apply and it is left as it is\n", path);
-    else
+    else {
+        ini_say_deprecated(path);
         ini_write();
+    }
     g_ini_started = 1;
 }
 /* ini edited while running: reloaded and applied what we can live, once it has stopped changing (an editor saving

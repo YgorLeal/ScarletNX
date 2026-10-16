@@ -6,6 +6,7 @@
 #ifndef SNX_INI_H
 #define SNX_INI_H
 #include <stddef.h>
+#include <stdio.h>
 
 enum {
     INI_INT,   /* an int at var, clamped to lo..hi */
@@ -41,5 +42,14 @@ void ini_format(const IniOpt* o, char* out, size_t n);
 void ini_word(const IniOpt* o, int v, char* out, size_t n);
 /* v a step down (dir -1) or up (1): words go round, numbers stop at lo and hi */
 int ini_step(const IniOpt* o, int v, int dir);
+
+/* a key an older version used, which does nothing now (docs/DEPRECATIONS.md): what became of it, NULL for another */
+const char* ini_deprecated(const char* key);
+/* the game's .ini's [Deprecated] section, its last: its head, then each key under what became of it. The launcher's
+   Clean old settings takes it from its head to the next section or the end */
+void ini_deprecated_head(FILE* f);
+void ini_deprecated_key(FILE* f, const char* key, const char* value);
+/* the line a run says about the n deprecated keys path has into out: 1, or 0 for none */
+int ini_deprecated_note(char* out, size_t size, const char* path, const char* const* keys, int n);
 
 #endif

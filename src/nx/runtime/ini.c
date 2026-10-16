@@ -73,3 +73,61 @@ int ini_step(const IniOpt* o, int v, int dir) {
     count = (int)((o->hi - o->lo) / step) + 1;
     return (int)o->lo + (((v - (int)o->lo) / step + dir) % count + count) % count * step;
 }
+
+/* what became of each: the rewritten file keeps them under [Deprecated] with it, and a run names them, for the player
+   to delete (the launcher's Settings > App > Clean old settings does it) */
+static const struct {
+    const char *key, *now;
+} INI_DEPRECATED[] = {{"audio_device", "playback follows the system's default"},
+                      {"renderer", "Vulkan is the only renderer"},
+                      {"dynamic_resolution", "went with the OpenGL renderer"},
+                      {"dynamic_resolution_min", "went with the OpenGL renderer"},
+                      {"game_dynamic_resolution", "went with the OpenGL renderer"},
+                      {"low_priority_shader_compiler", "went with the OpenGL renderer"},
+                      {"forced_vsync", "now vsync"},
+                      {"smooth_recording", "the F7 recorder went with the OpenGL renderer"},
+                      {"recording_fps", "the F7 recorder went with the OpenGL renderer"},
+                      {"lsfg", "LSFG went with the OpenGL renderer"},
+                      {"lsfg_dll", "LSFG went with the OpenGL renderer"},
+                      {"lsfg_target", "LSFG went with the OpenGL renderer"},
+                      {"lsfg_multiplier", "LSFG went with the OpenGL renderer"},
+                      {"lsfg_flow", "LSFG went with the OpenGL renderer"},
+                      {"lsfg_resolution", "LSFG went with the OpenGL renderer"},
+                      {"lossless_scaling", "LSFG went with the OpenGL renderer"},
+                      {"lossless_path", "LSFG went with the OpenGL renderer"},
+                      {"touch_controls", "now controls"},
+                      {"touch_controls_opacity", "now controls_opacity"},
+                      {"modo_tv", "now docked"},
+                      {"idioma", "now language"},
+                      {"resolucion", "now resolution"},
+                      {"sombras", "now shadows"},
+                      {"perfil", "now profile"},
+                      {NULL, NULL}};
+const char* ini_deprecated(const char* k) {
+    int i;
+    for (i = 0; INI_DEPRECATED[i].key; i++)
+        if (!strcmp(k, INI_DEPRECATED[i].key)) return INI_DEPRECATED[i].now;
+    return NULL;
+}
+void ini_deprecated_head(FILE* f) {
+    fprintf(f,
+            "\n[Deprecated]\n; keys an older version used, which do nothing now (docs/DEPRECATIONS.md): delete them, "
+            "or use Settings > App >\n;   Clean old settings in the launcher\n");
+}
+void ini_deprecated_key(FILE* f, const char* key, const char* value) {
+    fprintf(f, "; %s: %s\n%s=%s\n", key, ini_deprecated(key), key, value);
+}
+int ini_deprecated_note(char* out, size_t size, const char* path, const char* const* keys, int n) {
+    size_t at;
+    int i;
+    if (n <= 0 || !size) return 0;
+    at = (size_t)snprintf(out, size, "settings: %s keeps %d key%s this version does not use (", path, n,
+                          n > 1 ? "s" : "");
+    for (i = 0; i < n && at < size; i++) at += (size_t)snprintf(out + at, size - at, "%s%s", i ? ", " : "", keys[i]);
+    if (at < size)
+        snprintf(out + at, size - at,
+                 "), under [Deprecated]: delete %s, or use Settings > App > Clean old settings in "
+                 "the launcher",
+                 n > 1 ? "them" : "it");
+    return 1;
+}

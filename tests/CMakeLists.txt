@@ -308,6 +308,10 @@ snx_test_target(snx-test-vpad 11)
 target_link_libraries(snx-test-vpad PRIVATE scarletnx-common m)
 add_test(NAME vpad COMMAND snx-test-vpad)
 
+add_executable(snx-test-ini-deprecated ini_deprecated.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/ini.c")
+snx_test_target(snx-test-ini-deprecated 11)
+add_test(NAME ini_deprecated COMMAND snx-test-ini-deprecated)
+
 add_executable(snx-test-pad-map pad_map.c)
 snx_test_target(snx-test-pad-map 11)
 target_link_libraries(snx-test-pad-map PRIVATE scarletnx-common)
