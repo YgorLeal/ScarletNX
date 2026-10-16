@@ -154,6 +154,7 @@ void gpu_call(void (*fn)(void*), void* arg) {
     fn(arg); /* the GPU thread has nothing queued before it */
 }
 void gpu_channel_close(u32 channel) { test_gpu.closed_channel = channel; }
+void gpu_kick(void) {}
 void gpu_mem_written(u64 gva, u64 size) { (void)gva, (void)size; }
 
 /* host1x: one channel per NVDEC or VIC fd. Its ioctl can run a hook in the middle, as another guest thread would */

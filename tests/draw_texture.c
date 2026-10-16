@@ -40,7 +40,9 @@ u64 bl_offset(u32 x_bytes, u32 y, u32 z, u32 width_bytes, u32 height, u32 bh_log
 void gpu_signal_point(void) {}
 u64 guest_ns(void) { return 0; }
 u64 plat_ns(void) { return 0; }
-void plat_yield(void) {}
+void gpu_park(GpuChannel* ch, u32 kind, u64 addr, u32 val, int geq) {
+    (void)ch, (void)kind, (void)addr, (void)val, (void)geq;
+}
 void pm_lock(PMutex* m) { (void)m; }
 void pm_unlock(PMutex* m) { (void)m; }
 void i2m_launch(GpuChannel* ch, u32* regs, int base) { (void)ch, (void)regs, (void)base; }

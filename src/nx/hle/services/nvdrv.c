@@ -283,6 +283,7 @@ void syncpt_incr(u32 id) {
     pc_broadcast(&nv.sync_cv);
     pm_unlock(&nv.sync_lk);
     nv_events_check();
+    gpu_kick(); /* a GPU channel's stream may wait for it */
 }
 int syncpt_wait(u32 id, u32 thresh, i64 timeout) {
     pm_lock(&nv.sync_lk);

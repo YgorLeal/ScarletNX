@@ -557,6 +557,13 @@ add_executable(snx-test-draw-texture draw_texture.c "${PROJECT_SOURCE_DIR}/src/n
 snx_test_target(snx-test-draw-texture 23)
 add_test(NAME draw_texture COMMAND snx-test-draw-texture)
 
+# gpu.c's queue with stand-in engines: a channel waiting on a semaphore or a fence lets the others run (pthreads)
+if(NOT WIN32)
+    add_executable(snx-test-gpu-park gpu_park.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/gpu.c")
+    snx_test_target(snx-test-gpu-park 23)
+    add_test(NAME gpu_park COMMAND snx-test-gpu-park)
+endif()
+
 add_executable(snx-test-etc2 etc2_decode.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/texture/etc2.c")
 snx_test_target(snx-test-etc2 23)
 add_test(NAME etc2_decode COMMAND snx-test-etc2)

@@ -36,7 +36,20 @@ typedef struct GpuChannel {
     u32 cb_words[256];
     /* SetRenderEnable (3D 0x554-0x556) or its override (0x651) turned drawing off: draws and clears are skipped */
     int render_off;
+    /* what the stream waits for before its next method (gpu_park): the GPU thread runs other channels' work meanwhile,
+       as Host switches channels on a semaphore acquire that fails */
+    u32 park;      /* GPU_PARK_*, or 0 */
+    u32 park_val;  /* the value compared with, or the syncpoint's threshold */
+    int park_geq;  /* a semaphore reaches park_val (a wrapping compare) instead of equalling it */
+    u64 park_addr; /* the semaphore's GPU address, or the syncpoint id */
+    u64 park_end;  /* the plat_ns() past which the stream goes on anyway */
 } GpuChannel;
+enum {
+    GPU_PARK_SEMAPHORE = 1, /* the puller's SemaphoreOperation acquire */
+    GPU_PARK_REPORT,        /* the 3D or compute engine's report semaphore acquire */
+    GPU_PARK_SYNCPOINT,     /* the puller's syncpoint wait */
+    GPU_PARK_FENCE          /* a submission's fence, waited for before its first entry */
+};
 typedef struct {
     GpuChannel* chan[128]; /* one per syncpoint, and nvdrv hands out fewer than 128 */
     int nchan;
@@ -79,6 +92,12 @@ void gpu_submit(u64* entries, u32 n, u32 channel, u32 incs, u32 wait_id, u32 wai
 /* calls fn(arg) on the GPU thread once everything submitted before it has run */
 void gpu_call(void (*fn)(void*), void* arg);
 void gpu_channel_close(u32 channel); /* nvdrv closed the channel: a new one with the same id starts from reset */
+/* the channel's stream waits for the u32 at GPU address addr (a syncpoint's id for the syncpoint kinds) to equal val,
+   or reach it (geq), before its next method. Met already, nothing waits. Otherwise the method that asked returns,
+   the stream stops after it, and the GPU thread goes on with other channels until it's met */
+void gpu_park(GpuChannel* ch, u32 kind, u64 addr, u32 val, int geq);
+/* something a parked channel may wait for changed off the GPU thread (a syncpoint increment): look again. Any thread */
+void gpu_kick(void);
 extern volatile u64 g_gpu_submits;
 /* guest memory [cpu_addr, cpu_addr + len) changed without a write the host's write tracking sees: decommitted pages,
    which now read as zero (kernel/mem.c). Caches over that memory check it again. Any thread */

@@ -180,17 +180,8 @@ static void puller_method(GpuChannel* ch, u32 m, u32 v) {
                     memcpy(&q[2], &t, 8);
                     gmem_write(addr, q, 16);
                 }
-            } else if (op == 1 || op == 4) { /* acquire, with a timeout so a bad value can't hang us */
-                u64 end = plat_ns() + 2000000000ull;
-                for (;;) {
-                    u32 cur = gmem_r32(addr);
-                    if (op == 1 ? cur == r[6] : (i32)(cur - r[6]) >= 0) break;
-                    if (plat_ns() > end) {
-                        WARN("gpu: semaphore %llx waits for %x (has %x)\n", (unsigned long long)addr, r[6], cur);
-                        break;
-                    }
-                    plat_yield();
-                }
+            } else if (op == 1 || op == 4) { /* acquire (equal) or AcqGeq */
+                gpu_park(ch, GPU_PARK_SEMAPHORE, addr, r[6], op == 4);
             } else if (op == 8 || op == 16) { /* AcqAnd and Reduction aren't done: the stream goes on as if they were */
                 WARN_LIMIT(4, "gpu: semaphore operation %x at %llx not done\n", op, (unsigned long long)addr);
             }
@@ -202,11 +193,7 @@ static void puller_method(GpuChannel* ch, u32 m, u32 v) {
                 g_renderer->stream_incr(id);
             } else {
                 g_renderer->before_syncwait();
-                /* every channel's stream runs on the one GPU thread: an increment that has to come from another
-                   channel's submission can't happen while this waits */
-                if (!syncpt_wait(id, r[0x1C], 2000000000))
-                    WARN("gpu: channel %u waited 2 s for syncpoint %u to reach %u (it is at %u), and goes on\n", ch->id,
-                         id, r[0x1C], syncpt_read(id));
+                gpu_park(ch, GPU_PARK_SYNCPOINT, id, r[0x1C], 1);
             }
             break;
         }
@@ -318,10 +305,11 @@ static void call_method(GpuChannel* ch, u32 sub, u32 m, u32 v, int last) {
     }
 }
 
-static void run_pushbuffer(GpuChannel* ch, const u32* w, u32 n) {
+/* runs the words of a GPFIFO entry from word i, and returns where it stopped: n, or the word after a method that
+   parked the channel (gpu_park) */
+static u32 run_pushbuffer(GpuChannel* ch, const u32* w, u32 i, u32 n) {
     /* method batches can spill over into the next GPFIFO entry (hw does this, so does yuzu's DmaPusher).
      keep the batch state across entries or the leftover data gets parsed as headers */
-    u32 i = 0;
     for (;;) {
         if (ch->pb_k < ch->pb_cnt) {
             u32 mode = ch->pb_mode, sub = ch->pb_sub, m = ch->pb_m;
@@ -329,16 +317,17 @@ static void run_pushbuffer(GpuChannel* ch, const u32* w, u32 n) {
                 u32 k = ch->pb_k++;
                 u32 mm = mode == 1 ? m + k : mode == 5 ? (k == 0 ? m : m + 1) : m;
                 call_method(ch, sub, mm, w[i++], ch->pb_k == ch->pb_cnt);
+                if (ch->park) return i;
             }
             if (ch->pb_k < ch->pb_cnt) {
                 LOG_LIMIT(
                     6,
                     "gpu: method batch continues in the next GPFIFO entry (sub %u method %x mode %u, %u of %u words done)\n",
                     ch->pb_sub, ch->pb_m, ch->pb_mode, ch->pb_k, ch->pb_cnt);
-                return;
+                return i;
             } /* rest comes in the next entry */
         }
-        if (i >= n) return;
+        if (i >= n) return i;
         u32 h = w[i++];
         u32 mode = h >> 29, sub = (h >> 13) & 7, m = h & 0xFFF, cnt = (h >> 16) & 0x1FFF;
         if (h && (mode == 0 || mode == 2 || mode >= 6)) { /* shouldn't happen in a sane stream, log it */
@@ -363,7 +352,10 @@ static void run_pushbuffer(GpuChannel* ch, const u32* w, u32 n) {
                 break;
             /* modes 0/2 (old Fermi), 6, 7 carry no data words (same as DmaPusher). don't treat them as batches,
          a stray one would eat the following methods incl. syncpoint incrs */
-            case 4: call_method(ch, sub, m, cnt, 1); break;
+            case 4:
+                call_method(ch, sub, m, cnt, 1);
+                if (ch->park) return i;
+                break;
             default: break;
         }
     }
@@ -401,88 +393,199 @@ void gpu_channel_close(u32 channel) {
     pm_unlock(&g_gpulock);
 }
 
-static void gpu_submit_now(u64* e, u32 n, u32 channel) {
-    pm_lock(&g_gpulock);
-    GpuChannel* ch = chan_get(channel);
-    for (u32 k = 0; k < n; k++) {
-        u64 ent = e[k];
-        u64 va = ent & 0xFFFFFFFFFCull;
-        u32 words = (u32)((ent >> 42) & 0x1FFFFF);
-        if (!words) continue;
-        u32* buf = (u32*)gmem_ptr(va, (u64)words * 4);
-        if (buf)
-            run_pushbuffer(ch, buf, words);
-        else {
-            u32* tmp = malloc((u64)words * 4);
-            if (!tmp) {
-                WARN("gpu: no memory for a pushbuffer of %u words, skipped\n", words);
-                continue;
-            }
-            gmem_read(va, tmp, (u64)words * 4);
-            run_pushbuffer(ch, tmp, words);
-            free(tmp);
-        }
+/* ============================================================ waits */
+/* how long a stream waits before it goes on anyway, so a bad value can't stop its channel for good (the console
+   raises an interrupt) */
+static u64 park_timeout(u32 kind) { return kind == GPU_PARK_REPORT ? 1000000000ull : 2000000000ull; }
+/* how soon a semaphore wait reads memory again when nothing else happened. A release from another channel's stream, a
+   syncpoint increment or a new submission ends a wait at once, but a release the game's CPU code writes comes with no
+   wake: it is polled, as Host polls a failed acquire every ACQUIRE_RETRY cycles */
+#define GPU_ACQUIRE_RETRY_NS 500000ull
+static int park_on_syncpt(const GpuChannel* ch) { return ch->park == GPU_PARK_SYNCPOINT || ch->park == GPU_PARK_FENCE; }
+static int park_met(const GpuChannel* ch) {
+    if (park_on_syncpt(ch)) return (i32)(syncpt_read((u32)ch->park_addr) - ch->park_val) >= 0;
+    u32 cur = gmem_r32(ch->park_addr);
+    return ch->park_geq ? (i32)(cur - ch->park_val) >= 0 : cur == ch->park_val;
+}
+void gpu_park(GpuChannel* ch, u32 kind, u64 addr, u32 val, int geq) {
+    ch->park = kind;
+    ch->park_addr = addr;
+    ch->park_val = val;
+    ch->park_geq = geq;
+    if (park_met(ch))
+        ch->park = 0;
+    else
+        ch->park_end = plat_ns() + park_timeout(kind);
+}
+/* 1 when the channel can go on: it waits for nothing, what it waits for came, or it waited past its time. Otherwise
+   *wake moves up to when to look again */
+static int park_over(GpuChannel* ch, u64* wake) {
+    if (!ch->park) return 1;
+    if (park_met(ch)) {
+        ch->park = 0;
+        return 1;
     }
-    r3d_const_flush(ch);
-    r3d_pending_flush();
-    pm_unlock(&g_gpulock);
+    u64 now = plat_ns();
+    if (now >= ch->park_end) {
+        u32 ms = (u32)(park_timeout(ch->park) / 1000000);
+        if (park_on_syncpt(ch))
+            WARN("gpu: channel %u waited %u ms for syncpoint %u to reach %u (it is at %u)%s, and goes on\n", ch->id, ms,
+                 (u32)ch->park_addr, ch->park_val, syncpt_read((u32)ch->park_addr),
+                 ch->park == GPU_PARK_FENCE ? " before a submission" : "");
+        else
+            WARN("gpu: channel %u waited %u ms for %s %llx to %s %x (it has %x), and goes on\n", ch->id, ms,
+                 ch->park == GPU_PARK_REPORT ? "report semaphore" : "semaphore", (unsigned long long)ch->park_addr,
+                 ch->park_geq ? "reach" : "equal", ch->park_val, gmem_r32(ch->park_addr));
+        ch->park = 0;
+        return 1;
+    }
+    u64 t = ch->park_end;
+    if (!park_on_syncpt(ch) && now + GPU_ACQUIRE_RETRY_NS < t) t = now + GPU_ACQUIRE_RETRY_NS;
+    if (t < *wake) *wake = t;
+    return 0;
 }
 
-/* Submissions run in order on a thread of their own, as on the console: the ioctl only queues them, and the fence
+/* Submissions run on a thread of their own, as on the console: the ioctl only queues them, and the fence
    it returns (the channel's syncpoint, incremented once the job is done) tells the game when the work is complete.
    Processed inside the ioctl, the work held the game's submit lock for most of each frame: Tears of the Kingdom's
-   main thread waited on it nearly all the time and loading took minutes. */
+   main thread waited on it nearly all the time and loading took minutes.
+   Each channel's jobs run in order. A channel whose stream waits (gpu_park) holds up only its own later jobs, and the
+   GPU thread goes on with the others', which may be what it waits for: NVN and deko3d wait on one queue for a
+   semaphore another queue's stream releases, and the waiting queue can be flushed first */
 typedef struct {
     u64* e;
     u32 n, channel, incs;
     u32 wait_id, wait_val; /* a fence to wait for first (wait_id ~0: none) */
     u32 expect;            /* the syncpoint value the job's fence promised */
-    void (*fn)(void*);     /* or a call made in order with the submissions (vi's presents) */
+    void (*fn)(void*);     /* or a call made once every job queued before it is done (vi's presents) */
     void* arg;
+    u32 k, i;    /* where the job goes on: word i of entry k */
+    int started; /* its fence wait was asked for */
 } GpuJob;
 #define GPU_QUEUE 256
-static GpuJob g_q[GPU_QUEUE];
-static u32 g_qhead, g_qtail; /* jobs queued, jobs done */
-static PMutex g_qlock;
+static GpuJob g_q[GPU_QUEUE]; /* the jobs not done, oldest first: queued at the end, removed by the GPU thread */
+static u32 g_qn;
+static u32 g_qgen; /* bumped by every job queued and every gpu_kick: the GPU thread sleeps only on the latest */
+static PMutex g_qlock = PMUTEX_INIT; /* gpu_kick may come before gpu_init */
 static PCond g_qcv;
 static int g_qthread;
 
-static void gpu_run(GpuJob* j) {
-    if (j->fn) {
-        j->fn(j->arg);
-        return;
+/* runs a job as far as it goes, and returns 1 when it's done. *ran is set when any of it ran */
+static int gpu_job_run(GpuJob* j, u64* wake, int* ran) {
+    pm_lock(&g_gpulock);
+    GpuChannel* ch = chan_get(j->channel);
+    if (!j->started) {
+        j->started = 1;
+        if (j->wait_id != ~0u) gpu_park(ch, GPU_PARK_FENCE, j->wait_id, j->wait_val, 1);
     }
-    if (j->wait_id != ~0u && !syncpt_wait(j->wait_id, j->wait_val, 2000000000))
-        WARN(
-            "gpu: a submission waited 2 s on the GPU thread for syncpoint %u to reach %u (it is at %u), and runs anyway\n",
-            j->wait_id, j->wait_val, syncpt_read(j->wait_id));
-    gpu_submit_now(j->e, j->n, j->channel);
+    if (!park_over(ch, wake)) {
+        pm_unlock(&g_gpulock);
+        return 0;
+    }
+    *ran = 1;
+    while (j->k < j->n) {
+        u64 ent = j->e[j->k];
+        u64 va = ent & 0xFFFFFFFFFCull;
+        u32 words = (u32)((ent >> 42) & 0x1FFFFF);
+        if (j->i < words) {
+            u32* buf = (u32*)gmem_ptr(va, (u64)words * 4);
+            u32* tmp = NULL;
+            if (!buf) {
+                tmp = malloc((u64)words * 4);
+                if (tmp)
+                    gmem_read(va, tmp, (u64)words * 4);
+                else
+                    WARN("gpu: no memory for a pushbuffer of %u words, skipped\n", words);
+            }
+            if (buf || tmp) j->i = run_pushbuffer(ch, buf ? buf : tmp, j->i, words);
+            free(tmp);
+            if (ch->park) break;
+        }
+        j->k++;
+        j->i = 0;
+    }
+    int parked = ch->park != 0;
+    r3d_const_flush(ch);
+    r3d_pending_flush();
+    pm_unlock(&g_gpulock);
+    if (parked) return 0;
     gpu_signal_point();
     for (u32 i = 0; i < j->incs; i++) syncpt_incr(j->channel);
     /* a stream that increments less than its fence promised leaves whoever waits for the fence waiting 2 s */
     if ((i32)(syncpt_read(j->channel) - j->expect) < 0)
         WARN_LIMIT(16, "gpu: channel %u's submission left its syncpoint at %u, short of the %u its fence promised\n",
                    j->channel, syncpt_read(j->channel), j->expect);
+    return 1;
+}
+/* one look at the queue, oldest first: a job goes on unless an older job of its channel isn't done, and a call once
+   every older job is. Returns 1 when anything ran */
+static int gpu_pass(u64* wake) {
+    u32 held[GPU_QUEUE]; /* the channels of the jobs not done so far, whose later jobs wait behind them */
+    u32 nheld = 0, x = 0;
+    int ran = 0;
+    pm_lock(&g_qlock);
+    u32 n = g_qn;
+    pm_unlock(&g_qlock);
+    while (x < n) {
+        GpuJob* j = &g_q[x];
+        int done = 0;
+        if (j->fn) {
+            if (!x) {
+                j->fn(j->arg);
+                done = ran = 1;
+            }
+        } else {
+            u32 h = 0;
+            while (h < nheld && held[h] != j->channel) h++;
+            if (h == nheld) {
+                done = gpu_job_run(j, wake, &ran);
+                if (!done) held[nheld++] = j->channel;
+            }
+        }
+        if (!done) {
+            x++;
+            continue;
+        }
+        pm_lock(&g_qlock);
+        free(j->e);
+        memmove(j, j + 1, (g_qn - x - 1) * sizeof *j);
+        g_qn--;
+        pc_broadcast(&g_qcv); /* room for a gpu_queue waiting */
+        pm_unlock(&g_qlock);
+        n--;
+    }
+    return ran;
 }
 static void gpu_thread(void* p) {
     (void)p;
     for (;;) {
         pm_lock(&g_qlock);
-        while (g_qtail == g_qhead) pc_wait(&g_qcv, &g_qlock, -1);
-        GpuJob j = g_q[g_qtail % GPU_QUEUE];
+        while (!g_qn) pc_wait(&g_qcv, &g_qlock, -1);
+        u32 gen = g_qgen;
         pm_unlock(&g_qlock);
-        gpu_run(&j);
-        free(j.e);
+        u64 wake = ~0ull;
+        if (gpu_pass(&wake)) continue;
+        /* every job waits: until a job is queued, a kick, or a semaphore wait is due to read memory again */
         pm_lock(&g_qlock);
-        g_qtail++;
-        pc_broadcast(&g_qcv);
+        if (g_qgen == gen) {
+            u64 now = plat_ns();
+            if (wake == ~0ull)
+                pc_wait(&g_qcv, &g_qlock, -1);
+            else if (wake > now)
+                pc_wait(&g_qcv, &g_qlock, (i64)(wake - now));
+        }
         pm_unlock(&g_qlock);
     }
+}
+void gpu_kick(void) {
+    pm_lock(&g_qlock);
+    g_qgen++;
+    if (g_qthread) pc_broadcast(&g_qcv);
+    pm_unlock(&g_qlock);
 }
 
 void gpu_init(void) {
     pm_init(&g_gpulock);
-    pm_init(&g_qlock);
     pc_init(&g_qcv);
 }
 
@@ -492,8 +595,9 @@ static void gpu_queue(GpuJob j) {
         g_qthread = 1;
         if (plat_thread(gpu_thread, NULL, (size_t)16 << 20)) fatal("could not start the GPU thread");
     }
-    while (g_qhead - g_qtail >= GPU_QUEUE) pc_wait(&g_qcv, &g_qlock, -1);
-    g_q[g_qhead++ % GPU_QUEUE] = j;
+    while (g_qn >= GPU_QUEUE) pc_wait(&g_qcv, &g_qlock, -1);
+    g_q[g_qn++] = j;
+    g_qgen++;
     pc_broadcast(&g_qcv);
     pm_unlock(&g_qlock);
 }
@@ -501,12 +605,12 @@ volatile u64 g_gpu_submits;
 void gpu_submit(u64* e, u32 n, u32 channel, u32 incs, u32 wait_id, u32 wait_val, u32 expect) {
     g_gpu_submits++;
     if (g_renderer->async_submit(e, n, channel, incs)) return;
-    GpuJob j = {malloc((u64)n * 8 + 8), n, channel, incs, wait_id, wait_val, expect, NULL, NULL};
+    GpuJob j = {malloc((u64)n * 8 + 8), n, channel, incs, wait_id, wait_val, expect, NULL, NULL, 0, 0, 0};
     if (!j.e) fatal("Out of memory queueing a GPU submission");
     memcpy(j.e, e, (u64)n * 8);
     gpu_queue(j);
 }
 void gpu_call(void (*fn)(void*), void* arg) {
-    GpuJob j = {NULL, 0, 0, 0, ~0u, 0, 0, fn, arg};
+    GpuJob j = {NULL, 0, 0, 0, ~0u, 0, 0, fn, arg, 0, 0, 0};
     gpu_queue(j);
 }
