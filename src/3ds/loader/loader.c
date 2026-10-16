@@ -149,48 +149,57 @@ static bool no_links(const char* path) {
 }
 /* The manifest is written last and published with the extraction. Reuse only
    this format's completed output for this CIA; never repair or overwrite it. */
-static bool reusable(const char* target, const CtrCia* cia) {
+static int reusable(const char* target, const CtrCia* cia) {
     char text[4097], expected[6][65] = {"1", "extracted"};
-    const char* keys[] = {"format", "state", "title_id", "title_version", "input_sha256", "code_sha256"};
+    const char* keys[] = {"format",     "state",      "title_id", "title_version", "input_sha256", "code_sha256",
+                          "entry",      "stack_size", "bss_size", "text_address",  "text_pages",   "text_bytes",
+                          "ro_address", "ro_pages",   "ro_bytes", "data_address",  "data_pages",   "data_bytes"};
+    const char* directories[] = {"contents", "exefs", "romfs"};
+    unsigned char hash[32];
+    size_t size, i;
+    uint64_t code_size;
+    CtrReader code;
+    CtrSpan span = {0, 0};
+    SnxIni ini;
+    char *key, *value;
+    unsigned seen = 0;
+    int ok;
     char* path = snx_path_join(target, "manifest.ini");
     FILE* file = no_links(path) && snx_is_file(path) ? snx_fopen(path, "rb") : NULL;
     free(path);
     if (!file) return false;
-    size_t size = fread(text, 1, sizeof text, file);
-    bool ok = !ferror(file) && size && size < sizeof text && !memchr(text, 0, size);
+    size = fread(text, 1, sizeof text, file);
+    ok = !ferror(file) && size && size < sizeof text && !memchr(text, 0, size);
     if (fclose(file)) ok = false;
     if (!ok) return false;
     text[size] = 0;
     snprintf(expected[2], sizeof expected[2], "%016" PRIx64, cia->title_id);
     snprintf(expected[3], sizeof expected[3], "%u", (unsigned)cia->version);
-    for (size_t i = 0; i < 32; ++i) snprintf(expected[4] + i * 2, 3, "%02x", cia->input_hash[i]);
+    for (i = 0; i < 32; ++i) snprintf(expected[4] + i * 2, 3, "%02x", cia->input_hash[i]);
     /* .code is expanded and padded, so its manifest hash differs from ExeFS's. */
     path = snx_path_join(target, "exefs/.code");
     file = no_links(path) && snx_is_file(path) ? snx_fopen(path, "rb") : NULL;
-    uint64_t code_size = snx_file_size(path);
+    code_size = snx_file_size(path);
     free(path);
     if (!file) return false;
-    unsigned char hash[32];
-    CtrReader code = {.input = file, .size = code_size};
-    ok = code_size && code_size <= CTR_CODE_LIMIT && ctr_hash(&code, (CtrSpan){0, code_size}, hash);
+    memset(&code, 0, sizeof code);
+    code.input = file;
+    code.size = span.size = code_size;
+    ok = code_size && code_size <= CTR_CODE_LIMIT && ctr_hash(&code, span, hash);
     if (fclose(file)) ok = false;
     if (!ok) return false;
-    for (size_t i = 0; i < 32; ++i) snprintf(expected[5] + i * 2, 3, "%02x", hash[i]);
-    SnxIni ini;
-    char *key, *value;
-    unsigned seen = 0;
+    for (i = 0; i < 32; ++i) snprintf(expected[5] + i * 2, 3, "%02x", hash[i]);
     snx_ini_start(&ini, text);
     while (snx_ini_next(&ini, &key, &value)) {
         if (*ini.section) return false;
-        for (size_t i = 0; i < sizeof keys / sizeof *keys; ++i) {
+        for (i = 0; i < sizeof keys / sizeof *keys; ++i) {
             if (strcmp(key, keys[i])) continue;
-            if ((seen & (1u << i)) || strcmp(value, expected[i])) return false;
+            if ((seen & (1u << i)) || !*value || (i < 6 && strcmp(value, expected[i]))) return false;
             seen |= 1u << i;
         }
     }
     if (seen != (1u << (sizeof keys / sizeof *keys)) - 1) return false;
-    const char* directories[] = {"contents", "exefs", "romfs"};
-    for (size_t i = 0; i < sizeof directories / sizeof *directories; ++i) {
+    for (i = 0; i < sizeof directories / sizeof *directories; ++i) {
         path = snx_path_join(target, directories[i]);
         ok = no_links(path) && snx_is_dir(path);
         free(path);

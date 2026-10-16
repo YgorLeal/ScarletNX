@@ -86,7 +86,15 @@ def main():
             assert old in original_manifest
             manifest_path.write_bytes(original_manifest.replace(old, new))
             retry_existing()
-        for malformed in [b'', b'x' * 4097, original_manifest + b'state=extracting\n', original_manifest + b'\0']:
+        for malformed in [
+            b'',
+            b'x' * 4097,
+            b'\n'.join(original_manifest.splitlines()[:6]) + b'\n',
+            original_manifest + b'state=extracting\n',
+            original_manifest + b'\0',
+            original_manifest.replace(b'entry=0x00100000\n', b''),
+            original_manifest.replace(b'data_bytes=4\n', b'data_bytes=\n'),
+        ]:
             manifest_path.write_bytes(malformed)
             retry_existing()
         manifest_path.unlink()

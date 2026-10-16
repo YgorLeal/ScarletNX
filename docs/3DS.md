@@ -55,7 +55,7 @@ is `work/3ds/<title-id>-<full-input-sha256>` of the data folder the Switch drive
 another), which an installed copy on Linux keeps in `~/.cache/scarletnx/work/3ds/`. No source CIA needs to be mounted by
 the future guest FS. Extraction is privately staged, then published only after
 all checks succeed; failures remove staging files. Existing destinations are
-reused only when their format-1 manifest records a completed extraction with the
+reused only when their format-1 manifest has all required fields and records a completed extraction with the
 same input SHA-256, title ID and version, the extracted code matches its recorded
 SHA-256, and the extraction directories are present without symlinks. Incomplete
 or mismatched outputs are refused, never overwritten or repaired. This reuses
