@@ -67,6 +67,18 @@ int main(void) {
     assert(buttons(NULL) == 3);
     assert(vpad_up(1) && buttons(NULL) == 3 && vpad_up(2) && buttons(NULL) == 2 && vpad_up(3) && !buttons(NULL));
     assert(!vpad_down(4, 1000, 500, safe) && !vpad_up(4));
+    /* a tap let go before the game reads the controls still reaches it, once: a button's and the D-pad's */
+    assert(vpad_down(4, mx(SNX_VPAD_A), my(SNX_VPAD_A), safe) && vpad_up(4) && buttons(NULL) == 1 && !buttons(NULL));
+    assert(vpad_down(4, mx(SNX_VPAD_DPAD), my(SNX_VPAD_DPAD) + 75, safe) && vpad_up(4)); /* past half its half */
+    assert(buttons(NULL) == 1u << 15 && !buttons(NULL));                                 /* down */
+    /* and a slide through a direction between two reads: the middle, right, the middle again */
+    assert(vpad_down(4, mx(SNX_VPAD_DPAD), my(SNX_VPAD_DPAD), safe) && !buttons(NULL));
+    vpad_move(4, mx(SNX_VPAD_DPAD) + 75, my(SNX_VPAD_DPAD), safe);
+    vpad_move(4, mx(SNX_VPAD_DPAD), my(SNX_VPAD_DPAD), safe);
+    assert(buttons(NULL) == 1u << 14 && !buttons(NULL) && vpad_up(4));
+    assert(vpad_down(4, mx(SNX_VPAD_A), my(SNX_VPAD_A), safe));
+    vpad_release(); /* the menu opened: what was pressed before is not the game's */
+    assert(!buttons(NULL));
     /* the shoulders, the stick buttons, plus and minus: their npad bits */
     assert(vpad_down(5, mx(SNX_VPAD_ZR), my(SNX_VPAD_ZR), safe) && buttons(NULL) == 1u << 9 && vpad_up(5));
     assert(vpad_down(5, mx(SNX_VPAD_L3), my(SNX_VPAD_L3), safe) && buttons(NULL) == 1u << 4 && vpad_up(5));
@@ -81,6 +93,7 @@ int main(void) {
     vpad_ini("controls_haptics", "0");
     vpad_actions();
     assert(vpad_down(7, mx(SNX_VPAD_Y), my(SNX_VPAD_Y), safe) && vpad_up(7) && !vpad_actions());
+    assert(buttons(NULL) == 1u << 3 && !buttons(NULL)); /* the tap, read once */
     vpad_ini("controls_haptics", "1");
 
     /* the D-pad: its middle holds no direction; past half its half, a direction; diagonals; a slide changes it */

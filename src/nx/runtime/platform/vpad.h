@@ -79,7 +79,8 @@ int vpad_down(u64 id, float x, float y, const int safe[4]);
 void vpad_move(u64 id, float x, float y, const int safe[4]);
 int vpad_up(u64 id);
 void vpad_release(void); /* every finger off: the menu opened, the window went away */
-/* the controls' buttons as HidNpadButton bits, and their sticks (lx, ly, rx, ry) from -32767 to 32767, right and up */
+/* the controls' buttons as HidNpadButton bits, and their sticks (lx, ly, rx, ry) from -32767 to 32767, right and up;
+   a button pressed and let go since the last call is in the bits this once */
 void vpad_state(u64* buttons, i32 sticks[4]);
 unsigned vpad_actions(void); /* SNX_VPAD_DO_ bits since the last call */
 

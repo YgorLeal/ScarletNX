@@ -82,6 +82,7 @@ static Finger g_fingers[FINGERS];
 static int g_nfingers;
 static u32 g_held;           /* a bit per control held down */
 static u32 g_dpad;           /* DPAD_ bits */
+static u64 g_tapped;         /* the buttons pressed since vpad_state last read them */
 static float g_axis[2][2];   /* each stick, -1 to 1 right and down */
 static float g_middle[2][2]; /* each stick's middle while held, 0 to 1 across the clear part as places are */
 static unsigned g_actions;
@@ -381,6 +382,8 @@ int vpad_down(u64 id, float x, float y, const int safe[4]) {
         buzz();
     }
     g_held |= 1u << c;
+    /* a tap shorter than the game's read still reaches it once, as a quick press of a pad's button does */
+    g_tapped |= INFO[c].kind == KIND_DPAD ? (u64)g_dpad : INFO[c].bit >= 0 ? 1ull << INFO[c].bit : 0;
     return 1;
 }
 void vpad_move(u64 id, float x, float y, const int safe[4]) {
@@ -388,9 +391,10 @@ void vpad_move(u64 id, float x, float y, const int safe[4]) {
     if (!f) return;
     if (g_edit)
         edit_move(f, x, y, safe);
-    else if (INFO[f->control].kind == KIND_DPAD && g_vpad.dpad_slide)
+    else if (INFO[f->control].kind == KIND_DPAD && g_vpad.dpad_slide) {
         dpad_at(f->control, x, y, safe);
-    else if (INFO[f->control].kind == KIND_STICK)
+        g_tapped |= g_dpad;
+    } else if (INFO[f->control].kind == KIND_STICK)
         stick_at(f->control, x, y, safe);
 }
 static void lift(Finger* f) {
@@ -417,11 +421,13 @@ int vpad_up(u64 id) {
 void vpad_release(void) {
     while (g_nfingers) lift(&g_fingers[0]);
     g_held = g_dpad = 0;
+    g_tapped = 0;
     memset(g_axis, 0, sizeof g_axis);
 }
 void vpad_state(u64* buttons, i32 sticks[4]) {
     int c, s;
-    *buttons = g_dpad;
+    *buttons = g_dpad | g_tapped;
+    g_tapped = 0;
     for (c = 0; c < SNX_VPAD_COUNT; ++c)
         if ((g_held >> c & 1) && INFO[c].bit >= 0) *buttons |= 1ull << INFO[c].bit;
     for (s = 0; s < 2; ++s) {
