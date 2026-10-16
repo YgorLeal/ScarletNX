@@ -284,9 +284,11 @@ int snx_recompile(int argc, char** argv, const SnxPaths* paths) {
             no_build = 1;
         else if (!strcmp(arg, "--interp-only"))
             gen.interp_only = 1;
-        else if (!strcmp(arg, "--keep-ir") || !strcmp(arg, "--keep-c"))
+        else if (!strcmp(arg, "--keep-ir") || !strcmp(arg, "--keep-c")) {
+            if (!strcmp(arg, "--keep-c"))
+                fprintf(stderr, "scarletnx: --keep-c is deprecated: use --keep-ir (docs/DEPRECATIONS.md)\n");
             keep_c = 1;
-        else if (!strcmp(arg, "--quiet") || !strcmp(arg, "-q"))
+        } else if (!strcmp(arg, "--quiet") || !strcmp(arg, "-q"))
             compile.quiet = gen.quiet = 1;
         else if (arg[0] == '-') {
             value = NULL;

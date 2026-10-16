@@ -281,6 +281,13 @@ int main(int argc, char** argv) {
     check_empty(temp);
     free(text);
     text = NULL;
+    { /* --keep-c, --keep-ir's old name: still taken, and said to be deprecated */
+        const char* old[] = {argv[1], "--repo", argv[2], "--recomp", "/nonexistent/old.nro", "--keep-c", NULL};
+        check(snx_run(old, root, NULL, &text) != 0 && strstr(text, "--keep-c is deprecated: use --keep-ir"),
+              "--keep-c said to be deprecated");
+        free(text);
+        text = NULL;
+    }
     k = 0;
     args[k++] = argv[1];
     args[k++] = "--repo";
