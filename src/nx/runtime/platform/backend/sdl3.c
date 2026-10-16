@@ -28,6 +28,7 @@
 #include <SDL3/SDL_vulkan.h>
 #include <SDL3/SDL.h>
 #include <time.h>
+#include "common/utilities/common.h"
 #include "common/utilities/window_icon.h"
 #include "nx/runtime/platform/controls_png.h"
 #include "common/utilities/build_info.h"
@@ -404,7 +405,7 @@ static int fatal_screen(const char* msg) {
     const char* log = NULL;
     SnxOverlayRect link = {0, 0, 0, 0};
 #ifndef __ANDROID__
-    char log_path[1200], log_url[3608];
+    char log_path[1200], log_url[3608], *full;
     int on_link = 0, pointer = 0;
     SDL_FingerID finger = 0;
 #endif
@@ -446,10 +447,17 @@ static int fatal_screen(const char* msg) {
 #ifdef __ANDROID__
     snprintf(what, sizeof what, "%s", how);
 #else
-    /* Match plat.c: installed builds write logs in their state folder. */
-    snprintf(what, sizeof what, "%s", how);
+    /* the log plat.c writes, in the state folder. Beside the game that is argv[0]'s folder, which may be relative (./
+       for ./Catherine), and a file URI needs an absolute path: without one the path stays plain text, as before */
     snprintf(log_path, sizeof log_path, "%s%s.log", g_statedir, g_exename);
-    if (fatal_log_url(log_path, log_url, sizeof log_url)) log = log_path;
+    full = snx_absolute(log_path);
+    if (full && strlen(full) < sizeof log_path) memcpy(log_path, full, strlen(full) + 1);
+    free(full);
+    if (fatal_log_url(log_path, log_url, sizeof log_url)) {
+        snprintf(what, sizeof what, "%s", how);
+        log = log_path;
+    } else
+        snprintf(what, sizeof what, "%s%s", how, log_path);
 #endif
     since = SDL_GetTicks();
     while (!done) {
