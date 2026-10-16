@@ -4,9 +4,6 @@ option(SNX_TEST_SANITIZERS "Run native regression tests with ASan and UBSan" OFF
 option(SNX_TEST_VULKAN "Run offscreen Vulkan integration tests (requires a Vulkan 1.3 ICD, e.g. lavapipe)" OFF)
 option(SNX_TEST_ARM_AOT "Build asset-free static ARM11/checked-memory witnesses (requires native LLVM SDK)" OFF)
 set(SNX_TEST_3DS_SUPERTUX "" CACHE FILEPATH "Optional pinned user-supplied SuperTux CIA native bootstrap test")
-if(SNX_TEST_3DS_SUPERTUX AND NOT SNX_3DS_AOT)
-    message(FATAL_ERROR "SNX_TEST_3DS_SUPERTUX requires SNX_3DS_AOT=ON")
-endif()
 if(SNX_TEST_SANITIZERS AND TARGET snx_driver)
     target_compile_options(snx_driver PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
     target_link_options(snx_driver INTERFACE -fsanitize=address,undefined)
@@ -126,22 +123,22 @@ if(TARGET snx_ctr_board)
             add_test(NAME 3ds_driver COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/3ds_driver.py"
                 $<TARGET_FILE:scarletnx-3ds>)
             set(snx_ctr_extract_test_args "")
-            if(SNX_3DS_AOT)
-                set(snx_ctr_extract_test_args --aot)
-                add_test(NAME 3ds_static_pipeline COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/3ds_aot.py"
-                    $<TARGET_FILE:scarletnx-3ds> $<TARGET_FILE:scarletnx-3ds-aot> $<TARGET_FILE:snx-test-3ds-native>)
-                set_tests_properties(3ds_static_pipeline PROPERTIES TIMEOUT 180)
-                if(SNX_TEST_3DS_SUPERTUX)
-                    get_filename_component(snx_supertux_cia "${SNX_TEST_3DS_SUPERTUX}" ABSOLUTE)
-                    set(snx_supertux_oracle_args "")
-                    if(SNX_TEST_ARM_DIFF)
-                        set(snx_supertux_oracle_args --oracle)
-                    endif()
-                    add_test(NAME 3ds_supertux_bootstrap COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/3ds_supertux.py"
-                        $<TARGET_FILE:scarletnx-3ds> "${snx_supertux_cia}" $<TARGET_FILE:snx-test-3ds-native> ${snx_supertux_oracle_args})
-                    set_tests_properties(3ds_supertux_bootstrap PROPERTIES TIMEOUT 1800 LABELS "external;bootstrap")
+
+            set(snx_ctr_extract_test_args --aot)
+            add_test(NAME 3ds_static_pipeline COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/3ds_aot.py"
+                $<TARGET_FILE:scarletnx-3ds> $<TARGET_FILE:scarletnx-3ds-aot> $<TARGET_FILE:snx-test-3ds-native>)
+            set_tests_properties(3ds_static_pipeline PROPERTIES TIMEOUT 180)
+            if(SNX_TEST_3DS_SUPERTUX)
+                get_filename_component(snx_supertux_cia "${SNX_TEST_3DS_SUPERTUX}" ABSOLUTE)
+                set(snx_supertux_oracle_args "")
+                if(SNX_TEST_ARM_DIFF)
+                    set(snx_supertux_oracle_args --oracle)
                 endif()
+                add_test(NAME 3ds_supertux_bootstrap COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/3ds_supertux.py"
+                    $<TARGET_FILE:scarletnx-3ds> "${snx_supertux_cia}" $<TARGET_FILE:snx-test-3ds-native> ${snx_supertux_oracle_args})
+                set_tests_properties(3ds_supertux_bootstrap PROPERTIES TIMEOUT 1800 LABELS "external;bootstrap")
             endif()
+            
             add_test(NAME 3ds_extract COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/3ds_extract.py"
                 $<TARGET_FILE:scarletnx-3ds> ${snx_ctr_extract_test_args})
             set_tests_properties(3ds_extract PROPERTIES TIMEOUT 120)
