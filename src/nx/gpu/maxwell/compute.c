@@ -66,7 +66,9 @@ void compute_method(GpuChannel* ch, u32 m, u32 v, int last) {
                     q[17] & 0x3FFFF, q[20] & 0xFF);
             }
         } break;
-        case 0x6C3: query_get(ch, ch->rcomp, 0x6C0, v); break; /* release the semaphore, the game may be waiting */
+        case 0x6C3:
+            query_get(ch, ch->rcomp, 0x6C0, v);
+            break; /* report semaphore: release, counter, or acquire (a wait) */
     }
 }
 void kepler_i2m_method(GpuChannel* ch, u32 m, u32 v) {

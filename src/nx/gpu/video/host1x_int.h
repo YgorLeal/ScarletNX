@@ -26,10 +26,10 @@ static inline u64 rd64(const u8* p, u32 off) {
     return v;
 }
 
-/* host1x.c */
+/* host1x.c: the guest memory len bytes at an iova cover, NULL when one mapping doesn't (or len is 0). Any thread */
 u8* iova_ptr(u64 iova, u64 len);
 
-/* nvdec.c: a decoder per NVDEC channel. The callers hold the host1x lock */
+/* nvdec.c: a decoder per NVDEC channel. nvdec_execute and nvdec_free run with the engines' lock held */
 typedef struct NvdecCtx NvdecCtx;
 NvdecCtx* nvdec_new(void); /* NULL when out of memory */
 void nvdec_free(NvdecCtx* d);

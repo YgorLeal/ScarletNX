@@ -76,14 +76,8 @@ static int vkr_start(void) {
 }
 
 /* ------------------------------------------------------------ the front end's calls */
-static int vkr_async_submit(u64* e, u32 n, u32 syncpt, u32 incs) {
-    (void)e;
-    (void)n;
-    (void)syncpt;
-    (void)incs;
-    __atomic_add_fetch(&g_vk_epoch, 1, __ATOMIC_RELAXED); /* memory may have changed since the last submit */
-    return 0;                                             /* gpu_submit queues it for the GPU thread */
-}
+/* a new epoch: the caches that trust what they checked in this one (buffers, constant buffers, shaders) check again */
+static void vkr_mem_may_have_changed(void) { __atomic_add_fetch(&g_vk_epoch, 1, __ATOMIC_RELAXED); }
 static void vkr_draw_texture(GpuChannel* ch) {
     vk_lock();
     vk_render_draw_texture(ch);
@@ -99,20 +93,6 @@ static void vkr_draw(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 c
     vk_lock();
     vk_render_draw(ch, indexed, topology, first, count, bv, bi, instances);
     vk_unlock();
-}
-/* a constant buffer bound to a stage: v bit 0 valid, bits 4-8 the slot; address and size from 0x8E0-0x8E2 */
-static void vkr_cb_bind(GpuChannel* ch, int stage, u32 v) {
-    u32* r = ch->r3d;
-    u32 idx = (v >> 4) & 31;
-    if (stage > 4 || idx >= 18) return;
-    /* the bindings are kept once, not per channel: a second channel drawing in 3D would take the first's. The first
-       time two channels bind is logged */
-    static GpuChannel* last;
-    if (last && last != ch)
-        LOG_LIMIT(1, "vulkan: constant buffers bound from a second GPU channel (bindings are shared)\n");
-    last = ch;
-    g_vk_cb[stage][idx] = (v & 1) ? ((u64)r[0x8E1] << 32) | r[0x8E2] : 0;
-    g_vk_cbsize[stage][idx] = (v & 1) ? r[0x8E0] : 0;
 }
 static int vkr_blit(const Surf2D* s, const Surf2D* d, int dx, int dy, int dw, int dh, double sx, double sy, double sdx,
                     double sdy) {
@@ -503,11 +483,10 @@ static u64 vkr_screenshot(const char* path) {
 const Renderer vk_renderer = {
     .name = "Vulkan",
     .start = vkr_start,
-    .async_submit = vkr_async_submit,
+    .mem_may_have_changed = vkr_mem_may_have_changed,
     .clear = vkr_clear,
     .draw_texture = vkr_draw_texture,
     .draw = vkr_draw,
-    .cb_bind = vkr_cb_bind,
     .blit = vkr_blit,
     .rt_flush = vkr_rt_flush,
     .rt_reload = vkr_rt_reload,

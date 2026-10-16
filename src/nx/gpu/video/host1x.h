@@ -7,12 +7,12 @@
 #define SNX_HOST1X_H
 #include "cpu/aarch64/cpu.h"
 
-/* one channel per nvdrv fd of /dev/nvhost-nvdec or /dev/nvhost-vic: its registers, syncpoints and (NVDEC) decoder.
-   NULL when out of memory */
-void* host1x_open(int is_vic);
-/* the fd closed: drops the decoder with its pending pictures and gives the syncpoints back */
-void host1x_close(void* ch);
-u32 host1x_ioctl(void* ch, u32 cmd, u8* d, u32 n);
+/* one channel per nvdrv fd of /dev/nvhost-nvdec or /dev/nvhost-vic: its registers, syncpoints and (NVDEC) decoder */
+typedef struct H1Ch H1Ch;
+H1Ch* host1x_open(int is_vic); /* NULL when out of memory */
+/* the fd closed: drops the decoder with its pending pictures and gives the syncpoints back. NULL does nothing */
+void host1x_close(H1Ch* ch);
+u32 host1x_ioctl(H1Ch* ch, u32 cmd, u8* d, u32 n);
 /* nvmap freed handle h: drops its NVDEC/VIC mapping so the IOVA range can be used again */
 void host1x_forget_handle(u32 h);
 /* FFmpeg's messages into the game log, warnings and above, a limited number (nvdec.c, in builds with FFmpeg). Every

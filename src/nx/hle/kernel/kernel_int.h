@@ -16,28 +16,29 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define R_TIMEOUT     0xEA01
-#define R_CANCELLED   0xEC01
-#define R_BADHANDLE   0xE401
-#define R_BADSTATE    0xFA01
-#define R_BUSY        0xF401
-#define R_BADADDR     0xCC01
-#define R_OUTOFMEM    0xD001
-#define R_BADENUM     0xF001
-#define R_BADCOMBO    0xE801  /* InvalidCombination */
-#define R_MSGTOOLARGE 0x20801 /* MessageTooLarge */
-#define R_NOTFOUND    0xF201
-#define R_OUTOFRANGE  0xEE01
-#define R_BADMEMSTATE 0xD401
-#define R_BADREGION   0xDC01
-#define R_NOTIMPL     0x4201 /* NotImplemented */
-#define R_BADSIZE     0xCA01
-#define R_BADPRIO     0xE001  /* InvalidPriority */
-#define R_BADCORE     0xE201  /* InvalidCoreId */
-#define R_LIMIT       0x10801 /* LimitReached: the resource limit has no room */
-#define HANDLE_WAIT   0x40000000u
-#define H_CUR_PROC    0xFFFF8001u
-#define H_CUR_THREAD  0xFFFF8000u
+#define R_TIMEOUT       0xEA01
+#define R_CANCELLED     0xEC01
+#define R_BADHANDLE     0xE401
+#define R_BADSTATE      0xFA01
+#define R_BUSY          0xF401
+#define R_BADADDR       0xCC01
+#define R_OUTOFMEM      0xD001
+#define R_BADENUM       0xF001
+#define R_BADCOMBO      0xE801  /* InvalidCombination */
+#define R_MSGTOOLARGE   0x20801 /* MessageTooLarge */
+#define R_NOTFOUND      0xF201
+#define R_OUTOFRANGE    0xEE01
+#define R_BADMEMSTATE   0xD401
+#define R_BADREGION     0xDC01
+#define R_NOTIMPL       0x4201 /* NotImplemented */
+#define R_BADSIZE       0xCA01
+#define R_BADPRIO       0xE001  /* InvalidPriority */
+#define R_BADCORE       0xE201  /* InvalidCoreId */
+#define R_LIMIT         0x10801 /* LimitReached: the resource limit has no room */
+#define R_SESSIONCLOSED 0xF601  /* SessionClosed: the server closed the session */
+#define HANDLE_WAIT     0x40000000u
+#define H_CUR_PROC      0xFFFF8001u
+#define H_CUR_THREAD    0xFFFF8000u
 typedef struct {
     u32 imm, res;
     u64 lr, a[4], o1;

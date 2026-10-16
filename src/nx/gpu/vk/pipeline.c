@@ -27,14 +27,14 @@ VkPipelineLayout g_vk_playout;
 VkDescriptorSetLayout g_vk_dslayout[5];
 u32 g_vk_stage_sets;
 static VkPipelineCache g_pcache;
-u64 g_vk_cb[5][18];
-u32 g_vk_cbsize[5][18];
-static int g_sh_bind; /* the stage whose constant buffers the translator reads */
+/* the channel and stage whose bound constant buffers the translator reads, for the vk_shader_get call running */
+static const GpuChannel* g_sh_ch;
+static int g_sh_bind;
 
 static int sh_cb_read(u32 idx, u32 off, u32* out) {
     if (idx >= 18) return 0;
-    u64 a = g_vk_cb[g_sh_bind][idx];
-    u32 sz = g_vk_cbsize[g_sh_bind][idx];
+    u64 a = g_sh_ch->cbind[g_sh_bind][idx];
+    u32 sz = g_sh_ch->cbind_size[g_sh_bind][idx];
     u32 limit = sz ? sz : 65536;
     if (!a || limit < 4 || off > limit - 4) return 0;
     gmem_read(a + off, out, 4);
@@ -263,8 +263,10 @@ static int code_same(const ShA* ca, u64 gva, u32 len, u64 qh) {
     return code_hash(gva, len) == qh;
 }
 
-VkSh* vk_shader_get(u64 gva, u64 gva_a, int stage, u32 int_mask, u32 sint_mask, u32 rt_int, u32 rt_sint, u32 clip) {
-    g_sh_bind = stage <= ST_FS ? stage : 0; /* g_vk_cb is by stage */
+VkSh* vk_shader_get(const GpuChannel* ch, u64 gva, u64 gva_a, int stage, u32 int_mask, u32 sint_mask, u32 rt_int,
+                    u32 rt_sint, u32 clip) {
+    g_sh_ch = ch;
+    g_sh_bind = stage <= ST_FS ? stage : 0; /* the bindings are by stage */
     u32 mask[5] = {int_mask, sint_mask, rt_int, rt_sint, clip};
     u32 mix = int_mask * 0x9E3779B1u ^ sint_mask * 0x85EBCA6Bu ^ rt_int * 0x27D4EB2Fu ^ rt_sint * 0x165667B1u ^
               clip * 0x61C88647u;

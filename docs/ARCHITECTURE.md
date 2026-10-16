@@ -138,13 +138,17 @@ service the runtime doesn't have gets sm's stand-in object, which answers every 
 ### GPU submit/present
 
 1. NVN command buffers -> `/dev/nvhost-gpu` GPFIFO ioctl -> `hle/services/nvdrv.c` -> `gpu_submit` (`gpu/gpu.c`).
-2. Copy entries to GPU queue; `nv.submit_lk` orders fence promises and cross-channel submits.
-   Promised GPU-channel fences wait on the GPU thread; host1x/CPU/unpromised fences wait on the submitter.
+2. Copy entries to GPU queue. `nv.submit_lk` orders fence promises and cross-channel submits. A submission's fence
+   is the stream's first wait on the GPU thread, whoever increments it, and the ioctl returns at once, as nvgpu's does.
 3. GPU-thread dispatch: 3D, MME, compute, 2D, DMA, inline-to-memory. Draws -> `g_renderer` (`gpu/renderer.h`).
-   Shaders: Maxwell SASS -> SPIR-V (`gpu/shader/`).
+   Shaders: Maxwell SASS -> SPIR-V (`gpu/shader/`). Each channel's jobs run in order. A stream that waits (a semaphore
+   acquire, a syncpoint wait, its fence) parks its channel (`gpu_park`), even inside a macro, and the thread runs the
+   other channels' jobs until the wait is met or times out. A release from another stream or a syncpoint increment
+   wakes it, and a release the CPU writes is polled every 0.5 ms while nothing else can run.
 4. Vk `stream_incr` lands compute writes in guest memory before incrementing the syncpoint.
-5. vi waits on unpromised fences, then queues present after preceding submits. GPU thread checks remaining fences;
-   `present_buffer` uses matching RT + vi crop, or converts guest memory.
+5. vi waits on the fences no submission promised (a host1x engine's, the CPU's), then queues present (`gpu_call`)
+   after the jobs of the channels that promised the others. Other channels' jobs don't hold it. The GPU thread checks
+   the remaining fences. `present_buffer` uses the matching RT and vi's crop, or converts guest memory.
 
 ### Renderer coherence + lifetime
 

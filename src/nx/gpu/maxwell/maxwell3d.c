@@ -100,8 +100,15 @@ void r3d_const_flush(GpuChannel* ch) {
     gmem_write(ch->cb_addr, ch->cb_words, (u64)ch->cb_n * 4);
     ch->cb_n = 0;
 }
+/* a constant buffer bound to a stage: v bit 0 valid, bits 4-8 the slot; address and size from 0x8E0-0x8E2. The
+   binding is the channel's 3D state, which the renderer reads at each draw: another channel's binds, run while this
+   one's stream waits (gpu_park), don't change it */
 void r3d_cb_bind(GpuChannel* ch, int stage, u32 v) {
-    if (g_renderer_up) g_renderer->cb_bind(ch, stage, v);
+    u32* r = ch->r3d;
+    u32 idx = (v >> 4) & 31;
+    if (stage > 4 || idx >= 18) return;
+    ch->cbind[stage][idx] = (v & 1) ? ((u64)r[0x8E1] << 32) | r[0x8E2] : 0;
+    ch->cbind_size[stage][idx] = (v & 1) ? r[0x8E0] : 0;
 }
 int r3d_blit(const Surf2D* s, const Surf2D* d, int dx, int dy, int dw, int dh, double sx, double sy, double sdx,
              double sdy) {

@@ -10,15 +10,14 @@
 typedef struct Renderer {
     const char* name;
     int (*start)(void); /* 0 when it can't run here */
-    /* called first for every GPFIFO submission, on the submitting thread before gpu_submit queues it. 1 would mean the
-       renderer took it, skipping the GPU thread with its order and fence wait; Vulkan returns 0 and notes that guest
-       memory may have changed */
-    int (*async_submit)(u64* e, u32 n, u32 syncpt, u32 incs);
+    /* guest memory may have changed since the renderer's caches last checked it: a submission came (on the
+       submitting thread), or a stream goes on after a wait (gpu_park, on the GPU thread) that the CPU may have ended
+       after writing data. Caches read guest memory again. Any thread */
+    void (*mem_may_have_changed)(void);
     /* the 3D engine (maxwell3d.c) */
     void (*clear)(GpuChannel* ch, u32 v);
     void (*draw)(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count, u32 base_vertex, u32 base_instance,
                  u32 instances);
-    void (*cb_bind)(GpuChannel* ch, int stage, u32 v);
     /* DRAW_TEXTURE: a texture's rectangle onto color target 0. NULL: not drawn */
     void (*draw_texture)(GpuChannel* ch);
     /* the 2D engine: 1 when the renderer did the blit on the GPU, 0 to do it in guest memory */

@@ -472,12 +472,12 @@ static u32 attr_bytes(u32 size) {
 }
 
 /* ------------------------------------------------------------ resources of a draw */
-static u32 tex_handle(int stage, u32 tcb, const ShTex* st) {
+static u32 tex_handle(const GpuChannel* ch, int stage, u32 tcb, const ShTex* st) {
     u32 ci = (st->bindless ? st->bl_cbuf : tcb) & 31, c2i = st->bl2_cbuf & 31;
-    u64 cba = ci < 18 ? g_vk_cb[stage][ci] : 0;
+    u64 cba = ci < 18 ? ch->cbind[stage][ci] : 0;
     u32 h = cba ? gmem_r32(cba + st->cbuf_off * 4) : 0;
     if (st->bindless && st->bl2) {
-        u64 c2 = c2i < 18 ? g_vk_cb[stage][c2i] : 0;
+        u64 c2 = c2i < 18 ? ch->cbind[stage][c2i] : 0;
         if (c2) h |= gmem_r32(c2 + st->bl2_off * 4);
     }
     return h;
@@ -520,14 +520,14 @@ static VkSh* fs_get_keyed(GpuChannel* ch, u64 addr, TexRes* res) {
             if (f.sint) rs |= 1u << i;
         }
     }
-    VkSh* s0 = vk_shader_get(addr, 0, ST_FS, 0, 0, 0, 0, 0);
+    VkSh* s0 = vk_shader_get(ch, addr, 0, ST_FS, 0, 0, 0, 0, 0);
     if (!s0) return s0;
     u32 tm = 0, ts = 0;
     int nt = s0->si.ntex > SH_MAXTEX ? SH_MAXTEX : s0->si.ntex;
     for (int i = 0; i < nt; i++) {
         ShTex* st = &s0->si.tex[i];
         if (st->shadow) continue;
-        tex_resolve(ch, tex_handle(4, r[0x982], st), &res[i]);
+        tex_resolve(ch, tex_handle(ch, 4, r[0x982], st), &res[i]);
         Surf* t = res[i].t;
         u32 ty = (res[i].tic[0] >> 7) & 7;
         /* a depth target's stencil is an unsigned integer, whatever the surface holds */
@@ -542,13 +542,13 @@ static VkSh* fs_get_keyed(GpuChannel* ch, u64 addr, TexRes* res) {
         if (s0->si.img[i].kind == 1) continue; /* atomics require an unsigned integer image */
         ShTex handle_info = {
             .cbuf_off = s0->si.img[i].cbuf_off, .bindless = s0->si.img[i].bindless, .bl_cbuf = s0->si.img[i].bl_cbuf};
-        u32 handle = tex_handle(4, r[0x982], &handle_info), tic[8];
+        u32 handle = tex_handle(ch, 4, r[0x982], &handle_info), tic[8];
         gmem_read(tic_base + (handle & 0xFFFFF) * 32ull, tic, sizeof tic);
         Surf* image = vk_tex_from_tic(tic);
         if (image && !!image->f.is_int != !!s0->si.img[i].bindless) rm |= 1u << (8 + i);
     }
     if (!tm && !rm) return s0;
-    return vk_shader_get(addr, 0, ST_FS, tm, ts, rm, rs, 0);
+    return vk_shader_get(ch, addr, 0, ST_FS, tm, ts, rm, rs, 0);
 }
 
 VkImageViewType vk_tex_view_type(const ShTex* st) {
@@ -605,7 +605,7 @@ VkSampler vk_tex_bind_sampler(const u32* tsc, const ShTex* st, int num, const Su
 }
 
 /* a constant buffer's bytes for this draw, reused while the guest can't have changed them */
-static int cb_get(int stage, int i, u32 sz, VkBuffer* buf, u64* off) {
+static int cb_get(const GpuChannel* ch, int stage, int i, u32 sz, VkBuffer* buf, u64* off) {
     static int cache = -1;
     if (cache < 0) {
         const char* opt = getenv("SNX_VK_CB_CACHE");
@@ -617,7 +617,7 @@ static int cb_get(int stage, int i, u32 sz, VkBuffer* buf, u64* off) {
         VkBuffer buf;
         u64 off;
     } c[5][18];
-    u64 a = g_vk_cb[stage][i];
+    u64 a = ch->cbind[stage][i];
     /* Pending shader results there land first: the checks below only see guest memory. */
     if (g_cs_any && a) vk_compute_mem_need(a, sz);
     if (g_gfx_any && a) vk_buf_mem_need(a, sz);
@@ -800,7 +800,7 @@ static int tex_table_set(GpuChannel* ch, int stage, const VkSh* s, int slot, Sur
     const ShTex* st = &s->si.tex[slot];
     u32* r = ch->r3d;
     u32 shift = (u32)st->flags >> 4, bank = st->bl_cbuf & 31, size, handle, k;
-    u64 cba = bank < 18 ? g_vk_cb[stage][bank] : 0;
+    u64 cba = bank < 18 ? ch->cbind[stage][bank] : 0;
     VkImageViewType want = vk_tex_view_type(st);
     int num = st->shadow || !((s->si.tex_int_mask >> slot) & 1) ? 0 : ((s->si.tex_sint_mask >> slot) & 1) ? 2 : 1;
     VkImageView none = vk_null_view(want, st->shadow ? 3 : num), view;
@@ -808,7 +808,7 @@ static int tex_table_set(GpuChannel* ch, int stage, const VkSh* s, int slot, Sur
     VkWriteDescriptorSet* w;
     TexRes x;
     if (!none) return 0;
-    size = cba ? g_vk_cbsize[stage][bank] : 0;
+    size = cba ? ch->cbind_size[stage][bank] : 0;
     if (size > 65536 || !size) size = 65536;
     for (k = 0; k < SNX_TEX_ARRAY; k++) {
         u32 at = st->cbuf_off * 4 + (k << shift);
@@ -840,13 +840,13 @@ static int tex_table_set(GpuChannel* ch, int stage, const VkSh* s, int slot, Sur
     return 1;
 }
 
-static void draw_storage_read(VkDrawStorage* draw, VkSh* vs, VkSh* fs) {
+static void draw_storage_read(const GpuChannel* ch, VkDrawStorage* draw, VkSh* vs, VkSh* fs) {
     VkSh* sh[2] = {vs, fs};
     memset(draw, 0, sizeof *draw);
     for (int s = 0; s < 2; s++) {
         if (!sh[s]) continue;
         int stage = s ? 4 : 0;
-        u64 cb0 = g_vk_cb[stage][0];
+        u64 cb0 = ch->cbind[stage][0];
         draw->n[s] = sh[s]->si.ngbuf < 16 ? sh[s]->si.ngbuf : 16;
         if (cb0 && draw->n[s]) vk_buf_mem_need(cb0, 0x610);
         for (int i = 0; i < draw->n[s]; i++) {
@@ -878,14 +878,14 @@ static VkDescriptorSet stage_set(GpuChannel* ch, int stage, VkSh* s, Surf** rt, 
     d.n = 0;
     for (int i = 0; i < 18; i++) {
         if (!(s->si.cbuf_mask & (1u << i))) continue;
-        u32 sz = g_vk_cbsize[stage][i];
+        u32 sz = ch->cbind_size[stage][i];
         if (sz > 65536 || !sz) sz = 65536;
         if (s->si.cbuf_max[i] && sz > s->si.cbuf_max[i]) sz = s->si.cbuf_max[i]; /* only the bytes the shader reads */
         sz = (sz + 15) & ~15u;
         if (sz > g_vk.props.limits.maxUniformBufferRange) sz = g_vk.props.limits.maxUniformBufferRange;
         VkBuffer b;
         u64 o;
-        if (!cb_get(stage, i, sz, &b, &o)) return VK_NULL_HANDLE;
+        if (!cb_get(ch, stage, i, sz, &b, &o)) return VK_NULL_HANDLE;
         dw_buffer(&d, set, SNX_VKB_CB + i, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, b, o, sz);
     }
     for (int i = 0; i < s->si.ngbuf && i < 16; i++) {
@@ -921,7 +921,7 @@ static VkDescriptorSet stage_set(GpuChannel* ch, int stage, VkSh* s, Surf** rt, 
             table = 1;
             continue;
         }
-        u32 handle = tex_handle(stage, tcb, st);
+        u32 handle = tex_handle(ch, stage, tcb, st);
         /* what fs_get_keyed resolved, unless it is a render target or a copy of one: a crop of the same target at
            another size, for another stage, replaces it. Other textures stay until the next present */
         TexRes own, *x = res ? &res[i] : NULL;
@@ -976,7 +976,7 @@ static VkDescriptorSet stage_set(GpuChannel* ch, int stage, VkSh* s, Surf** rt, 
     }
     for (int i = 0; i < s->si.nimg; i++) {
         const u32 bank = s->si.img[i].bindless ? s->si.img[i].bl_cbuf : tcb;
-        u64 cba = bank < 18 ? g_vk_cb[stage][bank] : 0;
+        u64 cba = bank < 18 ? ch->cbind[stage][bank] : 0;
         if (!cba || !images) return VK_NULL_HANDLE;
         u32 handle = gmem_r32(cba + (u64)s->si.img[i].cbuf_off * 4);
         u64 tic_base = ((u64)r[0x55D] << 32) | r[0x55E];
@@ -1131,13 +1131,15 @@ retry:
     /* SetUserClipEnable (0x544): a clip distance the program writes clips only when its bit is set, in the last
        stage before rasterization */
     clip = r[0x544] & 0xFF;
-    VkSh* vs = vk_shader_get(code + r[0x811], (r[0x800] & 1) ? code + r[0x801] : 0, ST_VS, attr_int, attr_sint, 0, 0,
-                             tes_on || gs_on ? SNX_SH_NOT_LAST : clip);
-    tcs = tcs_on ? vk_shader_get(code + r[0x821], 0, ST_TCS, 0, 0, 0, 0, SNX_SH_NOT_LAST) : NULL;
-    tes = tes_on ? vk_shader_get(code + r[0x831], 0, ST_TES, 0, 0, r[0xC8] & 0x333, 0, gs_on ? SNX_SH_NOT_LAST : clip)
-                 : NULL;
-    gs = gs_on ? vk_shader_get(code + r[0x841], 0, ST_GS, 0, 0, gs_input_vertices(topology, tes_on, r[0xC8]), 0, clip)
-               : NULL;
+    VkSh* vs = vk_shader_get(ch, code + r[0x811], (r[0x800] & 1) ? code + r[0x801] : 0, ST_VS, attr_int, attr_sint, 0,
+                             0, tes_on || gs_on ? SNX_SH_NOT_LAST : clip);
+    tcs = tcs_on ? vk_shader_get(ch, code + r[0x821], 0, ST_TCS, 0, 0, 0, 0, SNX_SH_NOT_LAST) : NULL;
+    tes = tes_on
+              ? vk_shader_get(ch, code + r[0x831], 0, ST_TES, 0, 0, r[0xC8] & 0x333, 0, gs_on ? SNX_SH_NOT_LAST : clip)
+              : NULL;
+    gs = gs_on
+             ? vk_shader_get(ch, code + r[0x841], 0, ST_GS, 0, 0, gs_input_vertices(topology, tes_on, r[0xC8]), 0, clip)
+             : NULL;
     if ((tcs && tcs->failed) || (tes && tes->failed) || (gs && gs->failed)) {
         g_vk_skipped++;
         return;
@@ -1363,7 +1365,7 @@ retry:
 
     /* descriptor sets (may record uploads and barriers, so before the pass opens) */
     VkDrawStorage storage;
-    draw_storage_read(&storage, vs, fs);
+    draw_storage_read(ch, &storage, vs, fs);
     int alias = storage.n[0] || storage.n[1] ? vk_buf_draw_has_alias(&storage) : 0;
     if (alias < 0) {
         g_vk_skipped++;
@@ -1373,7 +1375,7 @@ retry:
         if (g_cs_any) vk_compute_land();
         vk_buf_land(); /* a page atlas starts from the completed output of earlier draws */
         if (setup_frame != vk_frame_number() && ++retries < 4) goto retry;
-        draw_storage_read(&storage, vs, fs); /* landing may have changed storage descriptors in c0 */
+        draw_storage_read(ch, &storage, vs, fs); /* landing may have changed storage descriptors in c0 */
     }
     if ((storage.n[0] || storage.n[1]) && !vk_buf_draw_prepare(&storage)) {
         g_vk_skipped++;

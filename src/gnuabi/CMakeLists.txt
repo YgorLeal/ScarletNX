@@ -12,6 +12,9 @@ target_include_directories(scarletnx-gnuabi PUBLIC "${PROJECT_SOURCE_DIR}/src/gn
 if(NOT TARGET snx_arm_llvm AND NOT SNX_BUILD_NX)
     include("${CMAKE_SOURCE_DIR}/cmake/llvm.cmake")
     add_subdirectory("${CMAKE_SOURCE_DIR}/src/common/cpu/arm" gnuabi-arm-backend)
+    if(COMMAND snx_test_sanitize) # tests/CMakeLists.txt: made after it looked
+        snx_test_sanitize(snx_arm_llvm)
+    endif()
 endif()
 target_link_libraries(scarletnx-gnuabi PUBLIC scarletnx-common scarletnx-net snx_arm_llvm)
 target_compile_options(scarletnx-gnuabi PRIVATE -Wall -Wextra -Werror)
@@ -49,3 +52,7 @@ endif()
 
 include(GNUInstallDirs)
 install(TARGETS scarletnx-gnuabi-run RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+if(COMMAND snx_sanitizer_path) # tests/CMakeLists.txt: the runtime made here, and this folder's tests
+    snx_test_sanitize(scarletnx-gnuabi)
+    snx_sanitizer_path()
+endif()

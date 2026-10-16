@@ -65,15 +65,21 @@ u64 bl_offset(u32 x_bytes, u32 y, u32 z, u32 width_bytes, u32 height, u32 bh_log
 }
 void gpu_signal_point(void) {}
 u64 guest_ns(void) { return 0; }
-u64 plat_ns(void) { return 0; }
+static struct { /* the last wait the 3D engine asked for */
+    u32 kind, val;
+    u64 addr;
+    int geq, n;
+} parked;
 void gpu_park(GpuChannel* ch, u32 kind, u64 addr, u32 val, int geq) {
-    (void)ch, (void)kind, (void)addr, (void)val, (void)geq;
+    (void)ch;
+    parked.kind = kind, parked.addr = addr, parked.val = val, parked.geq = geq;
+    parked.n++;
 }
 void pm_lock(PMutex* m) { (void)m; }
 void pm_unlock(PMutex* m) { (void)m; }
 void i2m_launch(GpuChannel* ch, u32* regs, int base) { (void)ch, (void)regs, (void)base; }
 void i2m_data(GpuChannel* ch, u32 v) { (void)ch, (void)v; }
-void mme_run(GpuChannel* ch, u32 idx, const u32* params, u32 np) { (void)ch, (void)idx, (void)params, (void)np; }
+void mme_run(GpuChannel* ch, u32 idx, u32 np) { (void)ch, (void)idx, (void)np; }
 void logf_(int lvl, const char* fmt, ...) { (void)lvl, (void)fmt; }
 
 /* ------------------------------------------------ the cases */
@@ -187,7 +193,25 @@ int main(void) {
     maxwell3d_method(&ch, 0x651, 0, 1);
     expect(1, "override USE goes back to TRUE");
 
+    /* a report semaphore acquire (operation 1) is a wait of the stream: the address, the value, and COMPARISON
+       (bit 16) GE or EQ */
+    maxwell3d_method(&ch, 0x6C0, 0x12, 0);
+    maxwell3d_method(&ch, 0x6C1, 0x345600, 0);
+    maxwell3d_method(&ch, 0x6C2, 77, 0);
+    maxwell3d_method(&ch, 0x6C3, 1u | 1u << 16, 1);
+    if (parked.n != 1 || parked.kind != GPU_PARK_REPORT || parked.addr != 0x1200345600ull || parked.val != 77 ||
+        !parked.geq) {
+        fprintf(stderr, "FAIL: a report semaphore acquire (GE) asks the stream to wait for its address and value\n");
+        failures++;
+    }
+    maxwell3d_method(&ch, 0x6C3, 1, 1);
+    if (parked.n != 2 || parked.geq) {
+        fprintf(stderr, "FAIL: a report semaphore acquire (EQ) asks for an equal value\n");
+        failures++;
+    }
+
     if (failures) return 1;
-    puts("SetRenderEnable: FALSE, TRUE, CONDITIONAL, IF_EQUAL, IF_NOT_EQUAL and the override gate draws and clears");
+    puts("SetRenderEnable: FALSE, TRUE, CONDITIONAL, IF_EQUAL, IF_NOT_EQUAL and the override gate draws and clears; a "
+         "report semaphore acquire waits");
     return 0;
 }

@@ -135,50 +135,53 @@ static KObj* handle_object(u32 h) {
     return test_handles[h - 0x100];
 }
 
-/* the GPU: submissions and retired channels, recorded */
+/* the GPU: submissions, calls, kicks and retired channels, recorded */
 static struct {
     u64 entries[8];
-    u32 n, channel, incs, expect, submits, closed_channel, calls;
+    u32 n, channel, incs, wait_id, wait_val, expect, submits, closed_channel, calls, call_chans[4], ncall_chans, kicks;
 } test_gpu;
-void gpu_submit(u64* entries, u32 n, u32 channel, u32 incs, u32 wait_id, u32 wait_val, u32 expect) {
-    CHECK(n <= 8 && wait_id == ~0u);
-    memcpy(test_gpu.entries, entries, n * sizeof *entries);
+void gpu_submit(const void* entries, u32 n, u32 channel, u32 incs, u32 wait_id, u32 wait_val, u32 expect) {
+    CHECK(n <= 8);
+    memcpy(test_gpu.entries, entries, n * sizeof *test_gpu.entries);
     test_gpu.n = n;
     test_gpu.channel = channel;
     test_gpu.incs = incs;
+    test_gpu.wait_id = wait_id;
+    test_gpu.wait_val = wait_val;
     test_gpu.expect = expect;
     test_gpu.submits++;
 }
-void gpu_call(void (*fn)(void*), void* arg) {
+void gpu_call(void (*fn)(void*), void* arg, const u32* chans, u32 nchans) {
+    CHECK(nchans <= 4);
     test_gpu.calls++;
+    memcpy(test_gpu.call_chans, chans, nchans * sizeof *chans);
+    test_gpu.ncall_chans = nchans;
     fn(arg); /* the GPU thread has nothing queued before it */
 }
 void gpu_channel_close(u32 channel) { test_gpu.closed_channel = channel; }
-void gpu_kick(void) {}
+void gpu_kick(void) { test_gpu.kicks++; }
 void gpu_mem_written(u64 gva, u64 size) { (void)gva, (void)size; }
 
 /* host1x: one channel per NVDEC or VIC fd. Its ioctl can run a hook in the middle, as another guest thread would */
-typedef struct {
+struct H1Ch {
     int is_vic, closed;
     u32 ioctls;
-} TestChannel;
-static TestChannel test_channels[4];
+};
+static H1Ch test_channels[4];
 static unsigned test_nchannels;
 static void (*test_during_ioctl)(void);
-void* host1x_open(int is_vic) {
+H1Ch* host1x_open(int is_vic) {
     CHECK(test_nchannels < 4);
-    TestChannel* ch = &test_channels[test_nchannels++];
+    H1Ch* ch = &test_channels[test_nchannels++];
     ch->is_vic = is_vic;
     return ch;
 }
-void host1x_close(void* ch) {
-    if (!ch) return;
-    TestChannel* t = ch;
+void host1x_close(H1Ch* t) {
+    if (!t) return;
     CHECK(!t->closed);
     t->closed = 1;
 }
-u32 host1x_ioctl(void* ch, u32 cmd, u8* d, u32 n) {
-    TestChannel* t = ch;
+u32 host1x_ioctl(H1Ch* t, u32 cmd, u8* d, u32 n) {
     CHECK(!t->closed);
     t->ioctls++;
     if (test_during_ioctl) {
@@ -293,7 +296,54 @@ static void test_ioctl2(u32 gpu) {
     request(11, gpu, SUBMIT_GPFIFO_EX);
     ctx.a[0] = buf(IN0, 0x18);
     ctx.a[1] = buf(IN1, 8);
-    CHECK(nvdrv->dispatch(nvdrv, &ctx) == 0 && reply(0) == 0 && test_gpu.n == 1);
+    CHECK(nvdrv->dispatch(nvdrv, &ctx) == 0 && reply(0) == 0);
+    CHECK(test_gpu.submits == 4 && test_gpu.n == 1 && test_gpu.entries[0] == entries[0]);
+
+    /* FenceWait (1): the fence goes to the GPU thread as the stream's first wait, whoever increments it, and the
+       ioctl returns at once (the pc_wait stand-in fails any wait here) */
+    u8 h[0x18];
+    u32 fence[2] = {7, 0x1234}, flags = 1, one = 1;
+    memset(h, 0, sizeof h);
+    memcpy(h + 8, &one, 4);
+    memcpy(h + 12, &flags, 4);
+    memcpy(h + 16, fence, 8);
+    memcpy(GP(IN0), h, sizeof h);
+    request(11, gpu, SUBMIT_GPFIFO_EX);
+    ctx.a[0] = buf(IN0, 0x18);
+    ctx.a[1] = buf(IN1, 8);
+    CHECK(nvdrv->dispatch(nvdrv, &ctx) == 0 && reply(0) == 0);
+    CHECK(test_gpu.submits == 5 && test_gpu.wait_id == 7 && test_gpu.wait_val == 0x1234);
+}
+
+/* the ctrl device's syncpoint ioctls: an increment wakes the GPU thread (gpu_kick), an id past the table is
+   refused, and an unregistered event slot isn't signaled by a later increment */
+#define SYNCPT_READ   0xC0080014u
+#define SYNCPT_INCR   0x40040015u
+#define EVENT_WAIT_AS 0xC010001Eu
+#define EVENT_REG     0xC004001Fu
+#define EVENT_UNREG   0xC0040020u
+static void put(u32 off, u32 v) { memcpy(GP(IN0 + off), &v, 4); }
+static void test_ctrl_syncpoints(u32 ctrl) {
+    u32 kicks = test_gpu.kicks;
+    put(0, 40);
+    CHECK(nv_ioctl1(ctrl, SYNCPT_INCR, 4) == 0 && test_gpu.kicks == kicks + 1 && syncpt_read(40) == 1);
+    put(0, 40);
+    CHECK(nv_ioctl1(ctrl, SYNCPT_READ, 8) == 0 && gr32(OUT0 + 4) == 1);
+    put(0, SYNCPT_IDS + 40); /* would land on 40's entry */
+    CHECK(nv_ioctl1(ctrl, SYNCPT_INCR, 4) == 4 && syncpt_read(40) == 1 && test_gpu.kicks == kicks + 1);
+    /* slot 9: registered, armed by an async wait for 40 to reach 2, unregistered, then 40 reaches 2 */
+    put(0, 9);
+    CHECK(nv_ioctl1(ctrl, EVENT_REG, 4) == 0);
+    put(0, 40);
+    put(4, 2);
+    put(8, 0);
+    put(12, 9);
+    CHECK(nv_ioctl1(ctrl, EVENT_WAIT_AS, 16) == 5 && nv.nvev[9].armed);
+    CHECK((gr32(OUT0 + 12) & 0xF000FFFFu) == 0x10000009u && ((gr32(OUT0 + 12) >> 16) & 0xFFF) == 40);
+    put(0, 9);
+    CHECK(nv_ioctl1(ctrl, EVENT_UNREG, 4) == 0 && !nv.nvev[9].armed);
+    put(0, 40);
+    CHECK(nv_ioctl1(ctrl, SYNCPT_INCR, 4) == 0 && !nv.nvev[9].ev->signaled);
 }
 
 /* Ioctl3 (12): ctrl-gpu's GET_CHARACTERISTICS writes the characteristics to the inline output, B1 or C1 */
@@ -393,6 +443,7 @@ int main(void) {
     CHECK(!error && ctrl == 3);
     test_ioctl2(gpu);
     test_ioctl3(ctrlgpu);
+    test_ctrl_syncpoints(ctrl);
 
     /* a channel's own events (1 to 3), made on first query and kept by the fd; the ctrl fd's ids name event slots */
     KEvent* sm = query_event(gpu, 1);
@@ -400,12 +451,19 @@ int main(void) {
     KEvent* slot = query_event(ctrl, 0x10000005u);
     CHECK(slot == nv.nvev[5].ev && query_event(ctrl, 5) == slot);
 
-    /* closing the GPU channel retires its syncpoint once the GPU thread has run what was queued on it */
-    u32 sp = test_gpu.channel;
+    /* closing the GPU channel retires its syncpoint once the GPU thread has run what was queued on it: a call after
+       the channel's jobs */
+    u32 sp = test_gpu.channel, calls = test_gpu.calls;
     CHECK(nv_close(gpu) == 0 && test_gpu.closed_channel == sp && !nv.syncpt_used[sp] && !nv.nvf[gpu].dev);
+    CHECK(test_gpu.calls == calls + 1 && test_gpu.ncall_chans == 1 && test_gpu.call_chans[0] == sp);
     CHECK(sm->o.refs == 2); /* the game's two handles keep it, the fd's reference is gone */
     CHECK(nv_ioctl1(gpu, SUBMIT_GPFIFO_EX, 0x18) == 8);
     CHECK(nv_close(gpu) == 8 && nv_close(0) == 8 && nv_close(0xFFFF) == 8); /* not open: as an ioctl to it */
+    /* QueryEvent on an fd that isn't open: the bad-fd NvError, no handle, and no event slot of the ctrl device */
+    CHECK(!nv.nvev[6].ev);
+    request(4, gpu, 6);
+    CHECK(nvdrv->dispatch(nvdrv, &ctx) == 0 && reply(0) == 8 && ctx.nout_copy == 1 && ctx.out_copy[0] == 0);
+    CHECK(!nv.nvev[6].ev);
     test_close_during_ioctl();
 
     CHECK(nv_close(ctrlgpu) == 0 && nv_close(ctrl) == 0);

@@ -16,9 +16,8 @@ typedef struct {
 } IpcBuf;
 struct SvcObj;
 typedef struct IpcCtx {
-    KThread* th;
     u8* msg;
-    u64 msg_addr, msg_size;
+    u64 msg_size;
     u32 type;
     u32 cmd;
     u32 token;
@@ -64,8 +63,10 @@ typedef struct SvcObj {
 typedef struct KSession {
     KObj o;
     SvcObj* obj;
-    int is_domain;
-    struct Domain* domain; /* shared by cloned sessions, same as HOS */
+    /* NULL until ConvertCurrentObjectToDomain, set once (atomically: another thread's request reads it), and shared
+       by cloned sessions, same as HOS */
+    struct Domain* domain;
+    int closed; /* the server closed it (a Close, or a message type sf refuses): requests answer SessionClosed */
 } KSession;
 typedef struct Domain {
     SvcObj** obj;
@@ -138,11 +139,12 @@ int ipc_bad_objects(SvcObj* o, IpcCtx* c);
 SvcObj* ipc_in_obj(IpcCtx* c, int i); /* the request's object i (domains only), with a reference to drop */
 #define RC(mod, desc) ((mod) | ((desc) << 9))
 #define RC_OK         0
-int stub_ok(SvcObj* o, IpcCtx* c);            /* success for a command a service doesn't know, logged */
-int quiet_ok(SvcObj* o, IpcCtx* c);           /* the same, silent */
-int ipc_unknown(SvcObj* o, IpcCtx* c);        /* what the console answers it: sf's UnknownCommandId, logged */
-int ipc_warn_once(const char* name, u32 cmd); /* 1 the first three times a service command is seen unhandled */
-extern char g_ipc_ring[32][160];              /* the last requests, for crash reports */
+int stub_ok(SvcObj* o, IpcCtx* c);     /* success for a command a service doesn't know, logged */
+int quiet_ok(SvcObj* o, IpcCtx* c);    /* the same, silent */
+int ipc_unknown(SvcObj* o, IpcCtx* c); /* what the console answers it: sf's UnknownCommandId, logged */
+/* 1 the first three times a service command is seen unhandled (0 for a new one once 512 are counted) */
+int ipc_warn_once(const char* name, u32 cmd);
+extern char g_ipc_ring[32][160]; /* the last requests, for crash reports */
 extern u32 g_ipc_ring_n;
 
 /* service registry */

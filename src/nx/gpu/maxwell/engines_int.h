@@ -21,6 +21,7 @@
 void query_get(GpuChannel* ch, u32* r, int base, u32 v);
 
 /* mme.c */
-void mme_run(GpuChannel* ch, u32 idx, const u32* params, u32 np);
+/* runs macro idx over the np parameters in ch->mme_params (it may stop at a wait, gpu.h's mme_resume) */
+void mme_run(GpuChannel* ch, u32 idx, u32 np);
 
 #endif

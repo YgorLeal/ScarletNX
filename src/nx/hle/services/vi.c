@@ -131,12 +131,12 @@ typedef struct {
 } QueuedFrame;
 static void present_queued(void* p) {
     QueuedFrame* q = p;
-    /* nv_gpu_call_after left only fences the submissions before this reach: a wait here means one fell short */
+    /* nv_gpu_call_after left only fences the submissions before this reach, and they have all run: one not reached
+       now fell short, and waiting here would only stall the GPU thread */
     for (u32 i = 0; i < q->nf; i++)
-        if (q->id[i] != 0xFFFFFFFFu && !syncpt_wait(q->id[i], q->val[i], 1000000000))
-            WARN_LIMIT(8,
-                       "binder: QUEUE_BUFFER slot %d: fence syncpoint %u did not reach %u in 1 s, presenting anyway\n",
-                       q->slot, q->id[i], q->val[i]);
+        if (q->id[i] != 0xFFFFFFFFu && !syncpt_wait(q->id[i], q->val[i], 0))
+            WARN_LIMIT(8, "binder: QUEUE_BUFFER slot %d: fence syncpoint %u is at %u, short of %u, presenting anyway\n",
+                       q->slot, q->id[i], syncpt_read(q->id[i]), q->val[i]);
     Slot* s = &q->s;
     if (s->used)
         vi_show_buffer(s->nvmap_id, s->offset, s->w, s->h, s->pitch, s->layout, s->bhl, s->afmt, s->crop, s->transform);

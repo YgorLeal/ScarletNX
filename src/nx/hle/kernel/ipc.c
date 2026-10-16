@@ -96,7 +96,8 @@ u32 ipc_user_buffer(u64 a, u64 size) {
 
 /* only warn the first few times per command, some games call them in a loop. Requests come from every guest thread,
    and a service's name goes with the object, so the table keeps a copy under a lock. A name longer than the copy is
-   told apart by its first 127 characters (interface names are shorter) */
+   told apart by its first 127 characters (interface names are shorter). A command first seen once 512 are counted
+   is never warned */
 int ipc_warn_once(const char* name, u32 cmd) {
     static struct {
         char n[128];
@@ -108,7 +109,8 @@ int ipc_warn_once(const char* name, u32 cmd) {
     int r = 1, i = 0;
     for (; i < nt; i++)
         if (t[i].cmd == cmd && !strncmp(t[i].n, name, sizeof t[i].n - 1)) {
-            r = ++t[i].cnt <= 3;
+            if (t[i].cnt < 4) t[i].cnt++; /* stops at 4: a count that wrapped would warn again */
+            r = t[i].cnt <= 3;
             break;
         }
     if (i == nt && nt < 512) {
@@ -116,6 +118,9 @@ int ipc_warn_once(const char* name, u32 cmd) {
         t[nt].cmd = cmd;
         t[nt].cnt = 1;
         nt++;
+    } else if (i == nt) { /* the table is full: a command it can't count isn't warned on every call */
+        r = 0;
+        WARN_LIMIT(1, "IPC: more than 512 service commands unhandled, the rest aren't logged\n");
     }
     pm_unlock(&lk);
     return r;
@@ -204,10 +209,22 @@ static void drop_outputs(IpcCtx* c) {
 
 char g_ipc_ring[32][160];
 u32 g_ipc_ring_n;
+/* the ring's entries are claimed in order, slot seq & 31 for claim seq. A request whose service runs long can find
+   its slot claimed again after 32 more, and then leaves the newer entry alone. Best effort, for crash reports: a
+   claim and a write 32 claims apart can still meet in one slot, and the text stays bounded */
+static u32 g_ipc_ring_seq[32];
+static u32 ring_claim(void) {
+    u32 seq = __atomic_fetch_add(&g_ipc_ring_n, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_ipc_ring_seq[seq & 31], seq, __ATOMIC_RELEASE);
+    return seq;
+}
+static int ring_mine(u32 seq) { return __atomic_load_n(&g_ipc_ring_seq[seq & 31], __ATOMIC_ACQUIRE) == seq; }
 /* ============================================================ parsing */
 /* the kernel maps or copies a buffer with a size before the server sees the request, so one outside the address space
-   fails it. Only the bounds are checked: the console also refuses a buffer in unmapped memory, but looking each up
-   (mem_query) would take the memory lock on every request */
+   fails it. A receive list (C) buffer it only uses at the reply, failing that instead, but services here write C
+   buffers straight through GP(), so one is refused at the request too: GP() past the address space is host memory.
+   Only the bounds are checked: the console also refuses a buffer in unmapped memory, but looking each up (mem_query)
+   would take the memory lock on every request */
 static void check_buffer(IpcCtx* c, const IpcBuf* b) {
     if (b->size && (b->addr > AS_SIZE || b->size > AS_SIZE - b->addr)) c->kernel_rc = R_BADMEMSTATE;
 }
@@ -265,29 +282,32 @@ static void parse(IpcCtx* c) {
             if (i < 8) memcpy(&c->copy_h[i], p, 4);
         c->ncopy = ncopy < 8 ? (int)ncopy : 8;
     }
-    for (u32 i = 0; i < nx; i++, p += 8) {
-        if (i >= MAX_BUFS) continue;
+    for (u32 i = 0; i < nx; i++, p += 8) { /* each is checked, the ones past the arrays too */
         u32 a, b;
+        IpcBuf x;
         memcpy(&a, p, 4);
         memcpy(&b, p + 4, 4);
-        c->x[i].addr = b | ((u64)((a >> 12) & 15) << 32) | ((u64)((a >> 6) & 7) << 36);
-        c->x[i].size = a >> 16;
-        check_buffer(c, &c->x[i]);
+        x.addr = b | ((u64)((a >> 12) & 15) << 32) | ((u64)((a >> 6) & 7) << 36);
+        x.size = a >> 16;
+        x.flags = 0;
+        check_buffer(c, &x);
+        if (i < MAX_BUFS) c->x[i] = x;
     }
     c->nx = nx < MAX_BUFS ? (int)nx : MAX_BUFS;
     IpcBuf* lists[3] = {c->a, c->b, c->w};
     u32 cnt[3] = {na, nb, nw};
     for (int k = 0; k < 3; k++)
         for (u32 i = 0; i < cnt[k]; i++, p += 12) {
-            if (i >= MAX_BUFS) continue;
             u32 s, a, f;
+            IpcBuf d;
             memcpy(&s, p, 4);
             memcpy(&a, p + 4, 4);
             memcpy(&f, p + 8, 4);
-            lists[k][i].addr = a | ((u64)((f >> 28) & 15) << 32) | ((u64)((f >> 2) & 7) << 36);
-            lists[k][i].size = s | ((u64)((f >> 24) & 15) << 32);
-            lists[k][i].flags = f & 3;
-            check_buffer(c, &lists[k][i]);
+            d.addr = a | ((u64)((f >> 28) & 15) << 32) | ((u64)((f >> 2) & 7) << 36);
+            d.size = s | ((u64)((f >> 24) & 15) << 32);
+            d.flags = f & 3;
+            check_buffer(c, &d);
+            if (i < MAX_BUFS) lists[k][i] = d;
         }
     c->na = na < MAX_BUFS ? (int)na : MAX_BUFS;
     c->nb = nb < MAX_BUFS ? (int)nb : MAX_BUFS;
@@ -304,13 +324,16 @@ static void parse(IpcCtx* c) {
     /* C descriptors follow the data, or start where the header says */
     u8* cp = recv_off ? m + recv_off * 4 : p + ndata * 4;
     c->nc = nc < MAX_BUFS ? (int)nc : MAX_BUFS;
-    for (int i = 0; i < c->nc; i++, cp += 8) {
+    for (u32 i = 0; i < nc; i++, cp += 8) {
         u32 a, b;
+        IpcBuf r;
         memcpy(&a, cp, 4);
         memcpy(&b, cp + 4, 4);
-        c->c[i].addr = a | ((u64)(b & 0xFFFF) << 32);
-        c->c[i].size = b >> 16;
-        check_buffer(c, &c->c[i]);
+        r.addr = a | ((u64)(b & 0xFFFF) << 32);
+        r.size = b >> 16;
+        r.flags = 0;
+        check_buffer(c, &r);
+        if (i < MAX_BUFS) c->c[i] = r;
     }
     /* the data words end the request (inside the message: the size check above) */
     u8* end = p + ndata * 4;
@@ -329,7 +352,7 @@ static void parse(IpcCtx* c) {
     u8* d = raw;
     u32 dlen_max = 0x100; /* a domain message says how long its CMIF part is */
     c->is_domain = 0;
-    if (c->sess && c->sess->is_domain && (c->type == 4 || c->type == 6)) {
+    if (__atomic_load_n(&c->sess->domain, __ATOMIC_ACQUIRE) && (c->type == 4 || c->type == 6)) {
         if (end < d + 16) {   /* sf's first check, InvalidHeaderSize: nothing of the header is read */
             c->is_domain = 2; /* the client reads a domain reply */
             c->header_rc = RC(10, 202);
@@ -382,8 +405,18 @@ static void respond(IpcCtx* c) {
     u32 pad_bytes = ((hdr_words * 4 + 15) & ~15) - hdr_words * 4;
     /* SFCO(16) + payload; domains add a 16 byte header and object ids */
     u32 payload = (c->out_size + 3) & ~3u;
+    /* what fits the message buffer the reply goes back in: a reply built by hand that doesn't is cut, and logged */
+    u32 room = (u32)(c->msg_size < 0x100 ? c->msg_size : 0x100) - hdr_words * 4 -
+               (c->tipc ? 4 : pad_bytes + 16 + (dom ? 16 + c->nout_objs * 4 : 0)); /* TIPC's data isn't aligned */
+    if (payload > room) {
+        ipc_out_overflow(c);
+        payload = room & ~3u;
+    }
     u32 data_bytes = 16 + payload + (dom ? 16 + c->nout_objs * 4 : 0);
-    u32 ndata = (pad_bytes + data_bytes + 3) / 4 + (16 / 4); /* same slack the real kernel leaves */
+    /* the data words count 16 bytes for the alignment's padding, whatever it took, as libnx counts a request's: the
+       SDK's client aborts on a reply whose data words come to more than its 0x100 byte buffer, and a domain reply
+       with the 0xD0 bytes of output swipc allows comes to 0x100 exactly */
+    u32 ndata = (16 + data_bytes + 3) / 4;
     memcpy(m, &w0, 4);
     u32 w1 = ndata | (special ? 0x80000000u : 0);
     memcpy(m + 4, &w1, 4);
@@ -432,14 +465,15 @@ static void respond(IpcCtx* c) {
     if (dom) {
         u8* o = d + 16 + payload;
         for (int i = 0; i < c->nout_objs; i++) {
-            u32 id = c->out_objs[i] ? domain_add(c->sess->domain, c->out_objs[i]) : 0;
+            u32 id =
+                c->out_objs[i] ? domain_add(__atomic_load_n(&c->sess->domain, __ATOMIC_ACQUIRE), c->out_objs[i]) : 0;
             memcpy(o + i * 4, &id, 4);
         }
     }
 }
 
 static SvcObj* domain_get(KSession* s, u32 id) {
-    Domain* d = s->domain;
+    Domain* d = __atomic_load_n(&s->domain, __ATOMIC_ACQUIRE);
     if (!d) return NULL;
     pm_lock(&d->lk);
     SvcObj* o = (id && id <= (u32)d->n) ? d->obj[id - 1] : NULL;
@@ -448,7 +482,7 @@ static SvcObj* domain_get(KSession* s, u32 id) {
     return o;
 }
 SvcObj* ipc_in_obj(IpcCtx* c, int i) {
-    if (i >= c->nin_objs || !c->sess || !c->sess->domain) return NULL;
+    if (i >= c->nin_objs) return NULL;
     return domain_get(c->sess, c->in_objs[i]);
 }
 
@@ -456,35 +490,52 @@ SvcObj* ipc_in_obj(IpcCtx* c, int i) {
 static void control(IpcCtx* c, KSession* s) {
     switch (c->cmd) {
         case 0: { /* ConvertCurrentObjectToDomain */
-            s->is_domain = 1;
-            if (!s->domain) {
-                Domain* d = calloc(1, sizeof *d);
+            if (!__atomic_load_n(&s->domain, __ATOMIC_ACQUIRE)) {
+                /* filled in before it's published: another thread's request on the session may read it at once.
+                   Two converts at once keep the first domain */
+                Domain *d = calloc(1, sizeof *d), *none = NULL;
                 pm_init(&d->lk);
                 d->refs = 1;
-                s->domain = d;
                 svcobj_ref(s->obj);
                 domain_add(d, s->obj);
+                if (!__atomic_compare_exchange_n(&s->domain, &none, d, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                    domain_unref(d);
             }
             out32(c, 1);
+            break;
+        }
+        case 1: { /* CopyFromCurrentDomain {u32 object id}: a session of the domain's object, moved to the client */
+            u32 id;
+            ipc_in(c, 0, &id, 4);
+            if (!__atomic_load_n(&s->domain, __ATOMIC_ACQUIRE)) {
+                c->rc = RC(11, 491); /* sf::hipc TargetNotDomain */
+                break;
+            }
+            SvcObj* o = domain_get(s, id); /* its reference goes to the new session */
+            if (!o) {
+                c->rc = RC(11, 492); /* sf::hipc DomainObjectNotFound */
+                break;
+            }
+            out_move_h(c, session_new(o));
             break;
         }
         case 2:
         case 4: { /* CloneCurrentObject(Ex) */
             svcobj_ref(s->obj);
             KSession* ns = session_alloc(s->obj);
-            if (s->is_domain && s->domain) {
-                ns->is_domain = 1;
-                ns->domain = s->domain;
-                pm_lock(&s->domain->lk);
-                s->domain->refs++;
-                pm_unlock(&s->domain->lk);
+            Domain* d = __atomic_load_n(&s->domain, __ATOMIC_ACQUIRE);
+            if (d) {
+                pm_lock(&d->lk);
+                d->refs++;
+                pm_unlock(&d->lk);
+                ns->domain = d;
             }
             out_move_h(c, h_new(&ns->o));
             break;
         }
         case 3: out32(c, 0x8000); break; /* QueryPointerBufferSize */
         default:
-            WARN("control %u\n", c->cmd);
+            if (ipc_warn_once("IPC control", c->cmd)) WARN("IPC: control command %u not handled\n", c->cmd);
             c->rc = RC(10, 221); /* sf::cmif UnknownCommandId */
             break;
     }
@@ -495,16 +546,27 @@ void ipc_handle(KThread* t, u32 handle, u64 msg_addr, u64 msg_size) {
     /* the ref keeps the session alive while the request runs, if another thread closes the handle meanwhile */
     KSession* s = (KSession*)h_get_ref(handle, KO_SESSION);
     if (!s) {
-        WARN("SendSyncRequest to invalid handle %x (pc=%llx)\n", handle, (unsigned long long)cpu->pc);
+        WARN_LIMIT(8, "SendSyncRequest to invalid handle %x (pc=%llx)\n", handle, (unsigned long long)cpu->pc);
         cpu->x[0] = R_BADHANDLE;
+        u32 seq = ring_claim();
+        snprintf(g_ipc_ring[seq & 31], sizeof g_ipc_ring[0], "handle %x -> %x (not a session)", handle, R_BADHANDLE);
+        return;
+    }
+    if (__atomic_load_n(&s->closed, __ATOMIC_ACQUIRE)) { /* the server closed it: every request fails */
+        cpu->x[0] = R_SESSIONCLOSED;
+        u32 seq = ring_claim();
+        snprintf(g_ipc_ring[seq & 31], sizeof g_ipc_ring[0], "%s -> %x (session closed)", s->obj->name,
+                 R_SESSIONCLOSED);
+        kobj_unref(&s->o);
         return;
     }
     IpcCtx ctx;
     memset(&ctx, 0, sizeof ctx);
     IpcCtx* c = &ctx;
-    c->th = t;
+    const char* name = s->obj->name; /* for the ring: the object served, once it's known */
+    int served = 0;                  /* a service ran it, and wrote its own ring entry */
+    SvcObj* held = NULL;             /* domain_get's reference to the target, dropped at the end */
     c->msg = GP(msg_addr);
-    c->msg_addr = msg_addr;
     c->msg_size = msg_size;
     c->sess = s;
     parse(c);
@@ -518,17 +580,25 @@ void ipc_handle(KThread* t, u32 handle, u64 msg_addr, u64 msg_size) {
         cpu->x[0] = c->kernel_rc;
         goto out;
     }
-    if (c->type == 2 || c->type == 15) /* client closes the handle itself afterwards */
+    /* a Close (2, or 15 for TIPC), or a type sf doesn't serve (0, 1, 3, 8 to 14): sf closes the session without a
+       reply (Atmosphere's ServerSessionManager), and the client's SendSyncRequest and any later one get SessionClosed.
+       The SDK sends none of them: it closes with svcCloseHandle and sends only types 6 and 7 */
+    if (c->type != 4 && c->type != 5 && c->type != 6 && c->type != 7 && c->type < 16) {
+        if (c->type != 2 && c->type != 15)
+            WARN_LIMIT(4, "IPC: request to %s of message type %u, which sf doesn't serve: session closed\n", name,
+                       c->type);
+        __atomic_store_n(&s->closed, 1, __ATOMIC_RELEASE);
+        cpu->x[0] = R_SESSIONCLOSED;
         goto out;
+    }
     if (c->header_rc) { /* the control requests' header too */
         WARN_LIMIT(8, "IPC: request to %s with a broken header -> %x\n", s->obj->name, c->header_rc);
         c->rc = c->header_rc;
         respond(c);
         goto out;
     }
-    if (c->type == 5 || c->type == 7) {
+    if (c->type == 5 || c->type == 7) { /* answered plainly on a domain session too: parse left is_domain 0 */
         control(c, s);
-        c->is_domain = 0;
         respond(c);
         goto out;
     }
@@ -536,7 +606,7 @@ void ipc_handle(KThread* t, u32 handle, u64 msg_addr, u64 msg_size) {
 
     if (c->is_domain) {
         if (c->is_domain == 3) { /* close a domain object */
-            Domain* d = s->domain;
+            Domain* d = __atomic_load_n(&s->domain, __ATOMIC_ACQUIRE);
             SvcObj* old = NULL;
             if (d) {
                 pm_lock(&d->lk);
@@ -552,37 +622,49 @@ void ipc_handle(KThread* t, u32 handle, u64 msg_addr, u64 msg_size) {
             goto out;
         }
         if (c->is_domain != 2) { /* neither SendMessage nor Close */
-            WARN("domain request type %u\n", c->is_domain - 1);
+            WARN_LIMIT(8, "IPC: domain request type %u to %s\n", c->is_domain - 1, name);
             c->rc = RC(10, 211); /* sf::cmif InvalidInHeader */
             respond(c);
             goto out;
         }
-        obj = domain_get(s, c->domain_obj);
+        obj = held = domain_get(s, c->domain_obj);
         if (!obj) {
-            WARN("invalid domain object %u\n", c->domain_obj);
+            WARN_LIMIT(8, "IPC: domain object %u of %s isn't there\n", c->domain_obj, name);
             c->rc = RC(10, 261); /* sf::cmif TargetNotFound */
             respond(c);
             goto out;
         }
+        name = obj->name;
         if (c->domain_rc) { /* after the target, as sf checks the header's sizes */
-            WARN("domain request to object %u: bad header (%x)\n", c->domain_obj, c->domain_rc);
+            WARN_LIMIT(8, "IPC: domain request to object %u (%s): bad header (%x)\n", c->domain_obj, name,
+                       c->domain_rc);
             c->rc = c->domain_rc;
             respond(c);
-            svcobj_unref(obj);
             goto out;
         }
     }
     LOGV("IPC %s cmd %u\n", obj->name, c->cmd);
-    c->rc = (u32)obj->dispatch(obj, c);
-    if (c->rc) drop_outputs(c);
     {
-        u32 i = __atomic_fetch_add(&g_ipc_ring_n, 1, __ATOMIC_RELAXED) & 31, in0, in1;
+        /* in the ring before it runs, so a crash or a hang in the service shows the request it was serving */
+        u32 in0, in1;
         ipc_in(c, 0, &in0, 4);
         ipc_in(c, 4, &in1, 4);
-        snprintf(g_ipc_ring[i], sizeof g_ipc_ring[i], "%s cmd %u (in %x %x) -> %x", obj->name, c->cmd, in0, in1, c->rc);
+        u32 seq = ring_claim();
+        snprintf(g_ipc_ring[seq & 31], sizeof g_ipc_ring[0], "%s cmd %u (in %x %x) -> running", name, c->cmd, in0, in1);
+        c->rc = (u32)obj->dispatch(obj, c);
+        if (ring_mine(seq))
+            snprintf(g_ipc_ring[seq & 31], sizeof g_ipc_ring[0], "%s cmd %u (in %x %x) -> %x", name, c->cmd, in0, in1,
+                     c->rc);
+        served = 1;
     }
+    if (c->rc) drop_outputs(c);
     respond(c);
-    if (c->is_domain) svcobj_unref(obj); /* drop the ref from domain_get */
 out:
+    if (!served) { /* refused by the kernel or sf, or a control request or a close */
+        u32 rc = (u32)cpu->x[0] ? (u32)cpu->x[0] : c->rc, seq = ring_claim();
+        snprintf(g_ipc_ring[seq & 31], sizeof g_ipc_ring[0], "%s type %u cmd %u -> %x (not served)", name, c->type,
+                 c->cmd, rc);
+    }
+    if (held) svcobj_unref(held); /* after the ring: name may live in the object */
     kobj_unref(&s->o);
 }

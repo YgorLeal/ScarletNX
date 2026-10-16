@@ -1,12 +1,67 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright 2026 the ScarletNX contributors
-option(SNX_TEST_SANITIZERS "Run native regression tests with ASan and UBSan" OFF)
+option(SNX_TEST_SANITIZERS
+       "Build the native regression tests, and the in-tree libraries they exercise, with ASan and UBSan (a test build: \
+the runtime links those libraries too, and isn't deployed)" OFF)
 option(SNX_TEST_VULKAN "Run offscreen Vulkan integration tests (requires a Vulkan 1.3 ICD, e.g. lavapipe)" OFF)
 option(SNX_TEST_ARM_AOT "Build asset-free static ARM11/checked-memory witnesses (requires native LLVM SDK)" OFF)
-if(SNX_TEST_SANITIZERS AND TARGET snx_driver)
-    target_compile_options(snx_driver PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(snx_driver INTERFACE -fsanitize=address,undefined)
+# the in-tree libraries the tests exercise (the network stack, the loaders and LZ4, the recompiler and its backends):
+# an overflow in them shows only in code built with the sanitizers. The runtime links them too, so src/nx doesn't
+# deploy a sanitized one. A folder that makes one after this one calls snx_test_sanitize on it: the ARM backend of a
+# GNU ABI-only or an ARM AOT build, the GNU ABI runtime, the shader translator, the GUI's library
+function(snx_test_sanitize)
+    if(NOT SNX_TEST_SANITIZERS)
+        return()
+    endif()
+    foreach(target ${ARGN})
+        if(TARGET ${target})
+            target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+            get_target_property(type ${target} TYPE)
+            if(type STREQUAL "SHARED_LIBRARY" OR type STREQUAL "MODULE_LIBRARY")
+                target_link_options(${target} PUBLIC -fsanitize=address,undefined) # its own link too
+            else()
+                target_link_options(${target} INTERFACE -fsanitize=address,undefined)
+            endif()
+        endif()
+    endforeach()
+endfunction()
+snx_test_sanitize(snx_driver snx_nx_module snx_driver_llvm snx_driver_gccjit scarletnx-common scarletnx-net snx_lz4
+                  snx_llvm snx_arm_llvm snx_jit scarletnx-recompiler scarletnx-recompiler-shared)
+# one Python for the scripted tests: without it they are left out
+find_package(Python3 QUIET COMPONENTS Interpreter)
+# x86-64, by any of the names hosts give it
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set(snx_test_x86 ON)
+else()
+    set(snx_test_x86 OFF)
 endif()
+
+# On Windows a sanitized test needs the sanitizer runtime's DLLs on PATH. Each folder that adds tests (this one, the
+# top level, src/nx, src/gnuabi, src/gui) calls this for the ones it has added (the others don't mind the DLLs)
+function(snx_sanitizer_path)
+    if(NOT (SNX_TEST_SANITIZERS AND WIN32))
+        return()
+    endif()
+    execute_process(COMMAND "${CMAKE_C_COMPILER}" -print-resource-dir
+        OUTPUT_VARIABLE resource OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+    get_property(tests DIRECTORY PROPERTY TESTS)
+    if(tests)
+        set_tests_properties(${tests} PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${resource}/lib/windows")
+    endif()
+endfunction()
+# cpu_helpers.c built as the game's helpers are (snx_rtlib_flags in src/common/cpu/recompiler/llvm/CMakeLists.txt),
+# with -mcx16 on x86-64: its 16-byte compare-and-swap is then lock cmpxchg16b, not a libatomic call
+function(snx_cpu_helpers_flags target)
+    if(snx_test_x86)
+        target_compile_options(${target} PRIVATE -mcx16)
+    endif()
+endfunction()
+# a service's dispatchers, generated from types.swipc and the interfaces named (paths under src/nx). A handler takes
+# every argument of its command, used or not, so -Wextra's unused-parameter warning is off
+function(snx_service_swipc target)
+    target_compile_options(${target} PRIVATE -Wno-unused-parameter)
+    snx_swipc(${target} ROOT "${PROJECT_SOURCE_DIR}/src/nx" FILES hle/services/types.swipc ${ARGN})
+endfunction()
 
 function(snx_test_target target standard)
     set_target_properties(${target} PROPERTIES C_STANDARD ${standard} C_STANDARD_REQUIRED ON)
@@ -34,10 +89,7 @@ endfunction()
 
 if(TARGET snx_ctr_board)
     if(SNX_TEST_SANITIZERS)
-        foreach(target snx_ctr_board snx_ctr_memory snx_ctr_loader snx_ctr_cpu)
-            target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-            target_link_options(${target} INTERFACE -fsanitize=address,undefined)
-        endforeach()
+        snx_test_sanitize(snx_ctr_board snx_ctr_memory snx_ctr_loader snx_ctr_cpu)
         target_compile_options(scarletnx-3ds PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
     endif()
     add_executable(snx-test-3ds-board 3ds_board.c)
@@ -57,8 +109,7 @@ if(TARGET snx_ctr_board)
         target_compile_options(${target} PRIVATE -UNDEBUG)
     endforeach()
 
-    if (NOT WIN32)
-        find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(NOT WIN32)
         if(Python3_Interpreter_FOUND)
             add_test(NAME 3ds_driver COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/3ds_driver.py"
                 $<TARGET_FILE:scarletnx-3ds>)
@@ -84,6 +135,7 @@ endif()
 # create CPU execution tests that link the absent backend targets in that case.
 if(NOT SNX_BUILD_NX AND NOT SNX_BUILD_GNUABI)
     include(architecture.cmake)
+    snx_sanitizer_path()
     return()
 endif()
 
@@ -91,7 +143,6 @@ endif()
 if(SNX_BUILD_NX)
     find_program(SNX_SPIRV_VAL spirv-val)
     find_program(SNX_SPIRV_DIS spirv-dis)
-    find_package(Python3 QUIET COMPONENTS Interpreter)
     if(SNX_SPIRV_VAL AND SNX_SPIRV_DIS AND Python3_Interpreter_FOUND)
         add_executable(snx-test-spirv-emitter spirv_emitter.c spirv_emitter_fixture.c
             "${PROJECT_SOURCE_DIR}/src/nx/gpu/shader/spirv_emit.c")
@@ -117,27 +168,22 @@ snx_test_target(snx-test-a64-fp 11)
 if(NOT WIN32)
     target_link_libraries(snx-test-a64-fp PRIVATE m)
 endif()
-# cpu_helpers.c's 16-byte CAS needs cmpxchg16b inline, not a libatomic call (the runtime's toolchain.c has the
-# same flag for the same reason; the function-level target("cx16") is not enough on this Clang)
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    target_compile_options(snx-test-a64-fp PRIVATE -mcx16)
-endif()
+snx_cpu_helpers_flags(snx-test-a64-fp)
 add_test(NAME a64_fp_witnesses COMMAND snx-test-a64-fp)
 
 # one build per snx_crc32 path: the nibble table, PCLMULQDQ, PCLMULQDQ with SSE4.2
 function(snx_crc32_test name)
     add_executable(snx-test-${name} crc32_helper.c "${PROJECT_SOURCE_DIR}/src/common/cpu/aarch64/cpu_helpers.c")
     snx_test_target(snx-test-${name} 11)
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-        target_compile_options(snx-test-${name} PRIVATE -mcx16 ${ARGN})
-    endif()
+    snx_cpu_helpers_flags(snx-test-${name})
+    target_compile_options(snx-test-${name} PRIVATE ${ARGN})
     if(NOT WIN32)
         target_link_libraries(snx-test-${name} PRIVATE m)
     endif()
     add_test(NAME ${name} COMMAND snx-test-${name})
 endfunction()
 snx_crc32_test(crc32_helper)
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+if(snx_test_x86)
     snx_crc32_test(crc32_helper_clmul -mpclmul)
     snx_crc32_test(crc32_helper_x86 -msse4.2 -mpclmul)
 endif()
@@ -145,6 +191,7 @@ endif()
 add_executable(snx-test-a64-fp-arithmetic a64_fp_arithmetic_test.c
     "${PROJECT_SOURCE_DIR}/src/common/cpu/aarch64/cpu_helpers.c")
 snx_test_target(snx-test-a64-fp-arithmetic 11)
+snx_cpu_helpers_flags(snx-test-a64-fp-arithmetic)
 if(NOT WIN32)
     target_link_libraries(snx-test-a64-fp-arithmetic PRIVATE m)
 endif()
@@ -233,13 +280,10 @@ foreach(bad IN ITEMS
     endif()
 endforeach()
 
-# This IPC fixture stubs the kernel and needs no NX graphics/media dependencies. The tests that include a service's
-# file turn off -Wextra's unused-parameter warning: a handler takes every argument of its command, used or not
+# This IPC fixture stubs the kernel and needs no NX graphics/media dependencies
 add_executable(snx-test-bsd-service bsd_service.c)
 snx_test_target(snx-test-bsd-service 23)
-target_compile_options(snx-test-bsd-service PRIVATE -Wno-unused-parameter)
-snx_swipc(snx-test-bsd-service ROOT "${PROJECT_SOURCE_DIR}/src/nx" FILES hle/services/types.swipc
-          hle/services/network/bsd.swipc)
+snx_service_swipc(snx-test-bsd-service hle/services/network/bsd.swipc)
 target_link_libraries(snx-test-bsd-service PRIVATE scarletnx-net)
 add_test(NAME bsd_service COMMAND snx-test-bsd-service)
 set_tests_properties(bsd_service PROPERTIES TIMEOUT 60)
@@ -247,38 +291,36 @@ set_tests_properties(bsd_service PROPERTIES TIMEOUT 60)
 # sfdnsres and nifm (dns.c, nifm.c) offline, with bsd.c beside them for whether the console is online
 add_executable(snx-test-network-service network_service.c "${PROJECT_SOURCE_DIR}/src/nx/hle/services/network/bsd.c")
 snx_test_target(snx-test-network-service 23)
-target_compile_options(snx-test-network-service PRIVATE -Wno-unused-parameter)
-snx_swipc(snx-test-network-service ROOT "${PROJECT_SOURCE_DIR}/src/nx" FILES hle/services/types.swipc
-          hle/services/network/bsd.swipc hle/services/network/dns.swipc hle/services/network/nifm.swipc)
+snx_service_swipc(snx-test-network-service hle/services/network/bsd.swipc hle/services/network/dns.swipc
+                  hle/services/network/nifm.swipc)
 target_link_libraries(snx-test-network-service PRIVATE scarletnx-net)
 add_test(NAME network_service COMMAND snx-test-network-service)
 set_tests_properties(network_service PROPERTIES TIMEOUT 60)
 
-# ssl (ssl.c) against a TLS server in the test, on the game's bsd sockets (bsd.c, built beside)
-add_executable(snx-test-ssl-service ssl_service.c "${PROJECT_SOURCE_DIR}/src/nx/hle/services/network/bsd.c")
-snx_test_target(snx-test-ssl-service 23)
-target_compile_options(snx-test-ssl-service PRIVATE -Wno-unused-parameter)
-snx_swipc(snx-test-ssl-service ROOT "${PROJECT_SOURCE_DIR}/src/nx" FILES hle/services/types.swipc
-          hle/services/network/bsd.swipc hle/services/network/ssl.swipc)
-target_link_libraries(snx-test-ssl-service PRIVATE scarletnx-net OpenSSL::SSL)
-add_test(NAME ssl_service COMMAND snx-test-ssl-service)
-set_tests_properties(ssl_service PROPERTIES TIMEOUT 60)
+# ssl (ssl.c) against a TLS server in the test, on the game's bsd sockets (bsd.c, built beside). OpenSSL comes with
+# the NX, 3DS and hactool builds (cmake/dependencies.cmake), not with a GNU ABI-only one
+if(TARGET OpenSSL::SSL)
+    add_executable(snx-test-ssl-service ssl_service.c "${PROJECT_SOURCE_DIR}/src/nx/hle/services/network/bsd.c")
+    snx_test_target(snx-test-ssl-service 23)
+    snx_service_swipc(snx-test-ssl-service hle/services/network/bsd.swipc hle/services/network/ssl.swipc)
+    target_link_libraries(snx-test-ssl-service PRIVATE scarletnx-net OpenSSL::SSL)
+    add_test(NAME ssl_service COMMAND snx-test-ssl-service)
+    set_tests_properties(ssl_service PROPERTIES TIMEOUT 60)
+endif()
 
 # mm:u and hid's IHidServer (misc.c, hid.c), with the kernel objects stubbed
-add_executable(snx-test-misc-service misc_service.c "${PROJECT_SOURCE_DIR}/src/nx/hle/services/hid_touch.c")
-snx_test_target(snx-test-misc-service 23)
-target_compile_options(snx-test-misc-service PRIVATE -Wno-unused-parameter)
-snx_swipc(snx-test-misc-service ROOT "${PROJECT_SOURCE_DIR}/src/nx" FILES hle/services/types.swipc
-          hle/services/hid.swipc hle/services/misc.swipc)
-target_link_libraries(snx-test-misc-service PRIVATE OpenSSL::Crypto)
-add_test(NAME misc_service COMMAND snx-test-misc-service)
+if(TARGET OpenSSL::Crypto)
+    add_executable(snx-test-misc-service misc_service.c "${PROJECT_SOURCE_DIR}/src/nx/hle/services/hid_touch.c")
+    snx_test_target(snx-test-misc-service 23)
+    snx_service_swipc(snx-test-misc-service hle/services/hid.swipc hle/services/misc.swipc)
+    target_link_libraries(snx-test-misc-service PRIVATE OpenSSL::Crypto)
+    add_test(NAME misc_service COMMAND snx-test-misc-service)
+endif()
 
 # nvdrv's IPC side (nvdrv.c), with the GPU and host1x stand-ins in the test
 add_executable(snx-test-nvdrv-service nvdrv_service.c)
 snx_test_target(snx-test-nvdrv-service 23)
-target_compile_options(snx-test-nvdrv-service PRIVATE -Wno-unused-parameter)
-snx_swipc(snx-test-nvdrv-service ROOT "${PROJECT_SOURCE_DIR}/src/nx" FILES hle/services/types.swipc
-          hle/services/nvdrv.swipc)
+snx_service_swipc(snx-test-nvdrv-service hle/services/nvdrv.swipc)
 add_test(NAME nvdrv_service COMMAND snx-test-nvdrv-service)
 
 # ipc.c's parsing and replies (hle/kernel/ipc.c, included by the test) with raw HIPC messages laid out as libnx
@@ -319,7 +361,6 @@ target_compile_options(snx-test-ini PRIVATE -UNDEBUG) # its checks are asserts
 add_test(NAME ini COMMAND snx-test-ini)
 
 # the controls' atlas and their shaders are generated and checked in: their sources must still make them
-find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
     add_test(NAME controls_atlas_current
         COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/build-controls.py" --check)
@@ -339,6 +380,9 @@ add_test(NAME patched_copy COMMAND "${CMAKE_COMMAND}" "-DSRC=${PROJECT_SOURCE_DI
 add_test(NAME deps_cache COMMAND "${CMAKE_COMMAND}" "-DCC=${CMAKE_C_COMPILER}" "-DSRC=${PROJECT_SOURCE_DIR}"
          "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/deps-cache-test" -P "${CMAKE_CURRENT_SOURCE_DIR}/deps_cache_test.cmake")
 
+# hid's shared memory layout (src/nx/hle/services/hid_layout.h) is checked against Eden's declarations at a pinned
+# revision by check_hid_layout.py, run by hand: `python3 tests/check_hid_layout.py --eden <an Eden checkout>`. It
+# needs that checkout, so it isn't a test here
 add_executable(snx-test-hid-touch hid_touch.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/platform/touch.c"
     "${PROJECT_SOURCE_DIR}/src/nx/hle/services/hid_touch.c")
 snx_test_target(snx-test-hid-touch 11)
@@ -372,7 +416,6 @@ if(UNIX)
     add_executable(snx-test-gdbstub gdbstub.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/gdbstub.c")
     snx_test_target(snx-test-gdbstub 11)
     target_link_libraries(snx-test-gdbstub PRIVATE snx_test_common)
-    find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
         add_test(NAME gdbstub_native COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/gdbstub.py" $<TARGET_FILE:snx-test-gdbstub>)
@@ -407,15 +450,11 @@ if(NOT WIN32)
         "${PROJECT_SOURCE_DIR}/src/nx/hle/services/ldr.c" "${PROJECT_SOURCE_DIR}/src/nx/memory/mem.c"
         "${PROJECT_SOURCE_DIR}/src/common/cpu/aarch64/cpu_helpers.c")
     snx_test_target(snx-test-ldr-service 11)
-    target_compile_options(snx-test-ldr-service PRIVATE -Wno-unused-parameter)
-    snx_swipc(snx-test-ldr-service ROOT "${PROJECT_SOURCE_DIR}/src/nx" FILES hle/services/types.swipc
-              hle/services/ldr.swipc)
+    snx_service_swipc(snx-test-ldr-service hle/services/ldr.swipc)
     target_include_directories(snx-test-ldr-service PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     target_compile_definitions(snx-test-ldr-service PRIVATE SNX_RO_INTERP_TEST)
     target_link_libraries(snx-test-ldr-service PRIVATE OpenSSL::Crypto m)
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
-        target_compile_options(snx-test-ldr-service PRIVATE -mcx16)
-    endif()
+    snx_cpu_helpers_flags(snx-test-ldr-service)
     add_test(NAME ldr_service COMMAND snx-test-ldr-service)
     set_tests_properties(ldr_service PROPERTIES TIMEOUT 60)
 endif()
@@ -449,7 +488,6 @@ snx_test_target(snx-test-thumb-emit 11)
 target_link_libraries(snx-test-thumb-emit PRIVATE snx_arm_llvm)
 option(SNX_TEST_ARM_DIFF "Compare A32 LLVM execution with Python unicorn 2.1.4" OFF)
 if(UNIX AND NOT CMAKE_CROSSCOMPILING)
-    find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
         add_test(NAME arm_llvm_witnesses COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/arm_test.py"
             --emitter $<TARGET_FILE:snx-test-arm-emit> --cc "${CMAKE_C_COMPILER}")
@@ -512,21 +550,17 @@ add_test(NAME astc_decode COMMAND snx-test-astc)
 
 add_executable(snx-test-audio-out audio_out.c)
 snx_test_target(snx-test-audio-out 11)
-# a service's handlers take every argument of their command, used or not
-target_compile_options(snx-test-audio-out PRIVATE -Wno-unused-parameter)
-snx_swipc(snx-test-audio-out ROOT "${PROJECT_SOURCE_DIR}/src/nx" FILES hle/services/types.swipc hle/services/audio.swipc)
+snx_service_swipc(snx-test-audio-out hle/services/audio.swipc)
 # Isolate audout in this fixture without FFmpeg, also when testing a tools-only build.
 # Production NX targets always link FFmpeg and never define SNX_NO_H264.
 target_compile_definitions(snx-test-audio-out PRIVATE SNX_NO_H264)
 add_test(NAME audio_out COMMAND snx-test-audio-out)
-# the same fixture with FFmpeg's Opus decoder, for the hwopus decoders that open. FFmpeg::avcodec is defined after this
-# folder (cmake/dependencies.cmake), in every build but a tools-only one
+# the same fixture with FFmpeg's Opus decoder, for the hwopus decoders that open. FFmpeg::avcodec comes from
+# cmake/dependencies.cmake, before this folder, in every build but a tools-only one
 if(NOT SNX_TOOLS_ONLY)
     add_executable(snx-test-audio-opus audio_out.c)
     snx_test_target(snx-test-audio-opus 11)
-    target_compile_options(snx-test-audio-opus PRIVATE -Wno-unused-parameter)
-    snx_swipc(snx-test-audio-opus ROOT "${PROJECT_SOURCE_DIR}/src/nx" FILES hle/services/types.swipc
-              hle/services/audio.swipc)
+    snx_service_swipc(snx-test-audio-opus hle/services/audio.swipc)
     target_link_libraries(snx-test-audio-opus PRIVATE FFmpeg::avcodec)
     add_test(NAME audio_opus COMMAND snx-test-audio-opus)
 endif()
@@ -557,11 +591,15 @@ add_executable(snx-test-draw-texture draw_texture.c "${PROJECT_SOURCE_DIR}/src/n
 snx_test_target(snx-test-draw-texture 23)
 add_test(NAME draw_texture COMMAND snx-test-draw-texture)
 
-# gpu.c's queue with stand-in engines: a channel waiting on a semaphore or a fence lets the others run (pthreads)
-if(NOT WIN32)
-    add_executable(snx-test-gpu-park gpu_park.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/gpu.c")
+# gpu.c's queue over the real puller, 3D engine and macros: a channel waiting on a semaphore, a syncpoint, a fence or
+# inside a macro lets the others run, and goes on where it stopped (its platform stand-ins are pthreads)
+if(UNIX)
+    add_executable(snx-test-gpu-park gpu_park.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/gpu.c"
+        "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/engines.c" "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/maxwell3d.c"
+        "${PROJECT_SOURCE_DIR}/src/nx/gpu/maxwell/mme.c")
     snx_test_target(snx-test-gpu-park 23)
     add_test(NAME gpu_park COMMAND snx-test-gpu-park)
+    set_tests_properties(gpu_park PROPERTIES TIMEOUT 30) # a deadlock in the queue would otherwise hang ctest
 endif()
 
 add_executable(snx-test-etc2 etc2_decode.c "${PROJECT_SOURCE_DIR}/src/nx/gpu/texture/etc2.c")
@@ -591,9 +629,7 @@ foreach(suite tree service)
     add_test(NAME filesystem_${suite}
         COMMAND snx-test-fs-fixture $<TARGET_FILE:snx-test-fs-${suite}>)
 endforeach()
-target_compile_options(snx-test-fs-service PRIVATE -Wno-unused-parameter)
-snx_swipc(snx-test-fs-service ROOT "${PROJECT_SOURCE_DIR}/src/nx" FILES hle/services/types.swipc
-          hle/filesystem/fs.swipc)
+snx_service_swipc(snx-test-fs-service hle/filesystem/fs.swipc)
 add_test(NAME filesystem_raw
     COMMAND snx-test-fs-fixture $<TARGET_FILE:snx-test-fs-service> raw)
 
@@ -608,7 +644,6 @@ endif()
 endif() # SNX_BUILD_NX
 
 # dist/icons/ is what scripts/make-icons.py draws from dist/wimsy.svg: a changed SVG fails until it runs again
-find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
     add_test(NAME dist_icons COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/make-icons.py" --check)
 endif()
@@ -619,13 +654,4 @@ if(NOT WIN32)
         -DGUI=${SNX_BUILD_GUI} -DDIST=${PROJECT_SOURCE_DIR}/dist -P "${CMAKE_CURRENT_SOURCE_DIR}/dist_install.cmake")
 endif()
 include(architecture.cmake)
-
-# Every test of this folder, added above: a sanitized program needs the sanitizer runtime's DLLs on PATH, and the
-# others don't mind them
-if(SNX_TEST_SANITIZERS AND WIN32)
-    execute_process(COMMAND "${CMAKE_C_COMPILER}" -print-resource-dir
-        OUTPUT_VARIABLE snx_clang_resource OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
-    get_property(snx_sanitized_tests DIRECTORY PROPERTY TESTS)
-    set_tests_properties(${snx_sanitized_tests}
-        PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${snx_clang_resource}/lib/windows")
-endif()
+snx_sanitizer_path()

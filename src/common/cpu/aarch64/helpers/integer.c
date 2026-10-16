@@ -77,11 +77,13 @@ u32 snx_crc32(u32 acc, u64 val, int bytes, int castagnoli) {
 #endif
 }
 
-/* the 16-byte builtin compiles to lock cmpxchg16b only where cx16 is enabled, and the game module isn't built with
-   -mcx16, so STXP of a 64-bit pair used to take a fallback that swapped the two halves separately. That isn't atomic:
-   Tears of the Kingdom's lock-free lists (102 such pairs, a pointer and a counter) got a pointer from one thread and a
-   counter from another. Every x86-64 CPU that runs the game has cmpxchg16b, so this function enables it for itself.
-   Clang still warns that 16 bytes is past its lock-free size, though it emits the one instruction */
+/* the 16-byte builtin compiles to lock cmpxchg16b only where cx16 is enabled, and a build of this file without
+   -mcx16 (the helpers' snx_rtlib_flags have it now) made STXP of a 64-bit pair take a fallback that swapped the two
+   halves separately. That isn't atomic: Tears of the Kingdom's lock-free lists (102 such pairs, a pointer and a
+   counter) got a pointer from one thread and a counter from another. Every x86-64 CPU that runs the game has
+   cmpxchg16b, so this function enables it for itself. Builds pass -mcx16 too: Clang 18 still made the builtin a
+   libatomic call with the attribute alone (1aa39c0). Clang still warns that 16 bytes is past its lock-free size,
+   though it emits the one instruction */
 #ifndef __clang__
 #error "game modules are built with Clang: GCC makes the 16-byte compare-and-swap a call into libatomic"
 #endif

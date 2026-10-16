@@ -22,9 +22,18 @@ u8* g_mem;
 int g_verbose;
 int g_opt_auto_stub_ipc = 1;
 static int test_log; /* SNX_TEST_LOG=1 prints what ipc.c logs */
+/* single-threaded: the locks only have to be balanced, which the count checks at the end */
+static int test_locks;
 void pm_init(PMutex* m) { (void)m; }
-void pm_lock(PMutex* m) { (void)m; }
-void pm_unlock(PMutex* m) { (void)m; }
+void pm_lock(PMutex* m) {
+    (void)m;
+    test_locks++;
+}
+void pm_unlock(PMutex* m) {
+    (void)m;
+    CHECK(test_locks > 0);
+    test_locks--;
+}
 void logf_(int level, const char* format, ...) {
     (void)level;
     if (!test_log) return;
@@ -308,7 +317,7 @@ static struct {
     int has_pid, tipc, is_domain;
     u64 pid;
     int na, nb, nw, nx, nc, ncopy;
-    IpcBuf a, b, x, c;
+    IpcBuf a, b, x, c, c1;
     u32 copy_h, nin_objs, in_objs[8];
     SvcObj* in_obj[8];
 } got;
@@ -326,7 +335,8 @@ static SvcObj* test_object(const char* name) {
 }
 #define RC_FAIL RC(5, 7)
 /* records what reached it. 1 answers the sum of two words and a constant, 2 fails after putting handles, an object
-   and data in the reply, 3 answers an object */
+   and data in the reply, 3 answers an object, 4 answers a missing object, 5 answers 0xD0 bytes, 6 0x100 bytes (more
+   than fits), 7 two copy handles and 0xD0 bytes, 8 claims the crash report ring's next 32 entries while it runs */
 static int test_dispatch(SvcObj* self, IpcCtx* c) {
     got.calls++;
     got.self = self;
@@ -336,7 +346,7 @@ static int test_dispatch(SvcObj* self, IpcCtx* c) {
     got.has_pid = c->has_pid, got.pid = c->pid, got.tipc = c->tipc, got.is_domain = c->is_domain;
     got.na = c->na, got.nb = c->nb, got.nw = c->nw, got.nx = c->nx, got.nc = c->nc;
     got.ncopy = c->ncopy;
-    got.a = c->a[0], got.b = c->b[0], got.x = c->x[0], got.c = c->c[0], got.copy_h = c->copy_h[0];
+    got.a = c->a[0], got.b = c->b[0], got.x = c->x[0], got.c = c->c[0], got.c1 = c->c[1], got.copy_h = c->copy_h[0];
     got.nin_objs = (u32)c->nin_objs;
     for (int i = 0; i < c->nin_objs; i++) {
         got.in_objs[i] = c->in_objs[i];
@@ -361,6 +371,18 @@ static int test_dispatch(SvcObj* self, IpcCtx* c) {
             out32(c, 0xBAD);
             return RC_FAIL;
         case 3: out_obj(c, test_object("test:child")); return 0;
+        case 4: out_obj(c, NULL); return 0;
+        case 7:
+            out_copy_h(c, event_handle());
+            out_copy_h(c, event_handle());
+            /* fall through */
+        case 5:
+        case 6:
+            for (u32 i = 0; i < (c->cmd == 6 ? 0x100u : 0xD0u); i += 4) out32(c, 0xA0000000u + i);
+            return 0;
+        case 8:
+            for (int i = 0; i < 32; i++) ring_claim();
+            return 0;
         default: return RC(10, 221);
     }
 }
@@ -395,9 +417,9 @@ static void plain_requests(u32 h, SvcObj* root) {
     CHECK(got.calls == 1 && got.self == root && got.type == 4 && got.cmd == 1 && got.token == 0);
     CHECK(got.raw_size == 8 && got.raw_off == 32 && get32(got.raw) == 0x11223344 && get32(got.raw + 4) == 0x01020304);
     CHECK(!got.has_pid && !got.tipc && !got.is_domain && !got.na && !got.nb && !got.nx && !got.nc && !got.ncopy);
-    /* the reply: no handles, the SFCO header at the 16-aligned start, 12 bytes of data, and the 16 bytes of slack
-       the kernel leaves counted in the data words */
-    CHECK(get32(msg()) == 0 && get32(msg() + 4) == 13);
+    /* the reply: no handles, the SFCO header at the 16-aligned start, 12 bytes of data, and 16 bytes for the
+       alignment's padding counted in the data words */
+    CHECK(get32(msg()) == 0 && get32(msg() + 4) == 11);
     CHECK(get32(msg() + 16) == 0x4F434653 && get32(msg() + 20) == 0 && get32(msg() + 24) == 0 &&
           get32(msg() + 28) == 0);
     CHECK(get32(msg() + 32) == 0x12243648 && get64(msg() + 36) == 0x1122334455667788ull);
@@ -419,8 +441,8 @@ static void plain_requests(u32 h, SvcObj* root) {
                                                      .num_handles = 1,
                                                      .send_pid = 1});
     put32(r.hipc.copy_handles, 0xFFFF8001u);
-    put32(msg() + 12, 0xCAFE); /* the client's pid placeholder */
-    hipc_send_static(r.hipc.send_statics, 0x123456789ull, 0x40, 0);
+    put32(msg() + 12, 0xCAFE);                                       /* the client's pid placeholder */
+    hipc_send_static(r.hipc.send_statics, 0x1123456789ull, 0x40, 0); /* bits 32-35 and 36 of the address */
     hipc_buffer(r.hipc.send_buffers, 0x3000, 0x100, 0);
     hipc_buffer(r.hipc.recv_buffers, 0x1234567000ull, 0x100000200ull, 1);
     hipc_recv_static(r.hipc.recv_list, 0x4000, 0x80);
@@ -430,7 +452,7 @@ static void plain_requests(u32 h, SvcObj* root) {
     CHECK(send(h) == 0);
     CHECK(got.calls == 1 && got.type == 6 && got.cmd == 1 && got.token == 0x77);
     CHECK(got.has_pid && got.pid == K_PROCESS_ID && got.ncopy == 1 && got.copy_h == 0xFFFF8001u);
-    CHECK(got.nx == 1 && got.x.addr == 0x123456789ull && got.x.size == 0x40);
+    CHECK(got.nx == 1 && got.x.addr == 0x1123456789ull && got.x.size == 0x40);
     CHECK(got.na == 1 && got.a.addr == 0x3000 && got.a.size == 0x100 && got.a.flags == 0);
     CHECK(got.nb == 1 && got.b.addr == 0x1234567000ull && got.b.size == 0x100000200ull && got.b.flags == 1);
     CHECK(got.nc == 1 && got.c.addr == 0x4000 && got.c.size == 0x80 && !got.nw);
@@ -448,9 +470,16 @@ static void plain_requests(u32 h, SvcObj* root) {
     CHECK(resp.result == 0 && resp.hipc.special && !resp.hipc.num_copy_handles && resp.hipc.num_move_handles == 1);
     u32 child_h = get32(resp.hipc.move_handles);
     KSession* child = (KSession*)h_get_ref(child_h, KO_SESSION);
-    CHECK(child && child->obj && child->obj != root && !strcmp(child->obj->name, "test:child") && !child->is_domain);
+    CHECK(child && child->obj && child->obj != root && !strcmp(child->obj->name, "test:child") && !child->domain);
     kobj_unref(&child->o);
     CHECK(h_close(child_h) == 0);
+
+    /* a missing object in the reply is handle 0 */
+    clear();
+    cmif_make_request(msg(), (CmifRequestFormat){.request_id = 4});
+    CHECK(send(h) == 0 && got.cmd == 4);
+    resp = cmif_parse_response(msg(), 0, 0);
+    CHECK(resp.result == 0 && resp.hipc.num_move_handles == 1 && get32(resp.hipc.move_handles) == 0);
 }
 
 /* sf's plain processor: a CmifInHeader that the data words, as sf measures them, hold, with its magic and a version
@@ -534,8 +563,10 @@ static void kernel_refusals(u32 h) {
     CHECK(send_to(h, UBUF, 0x1000) == 0 && got.calls == 1 && got.raw_size == 8);
     CmifResponse resp = cmif_parse_response(GP(UBUF), 0, 12);
     CHECK(resp.result == 0 && get32(resp.data) == 3);
-    /* a handle that isn't a session */
+    /* a number that isn't a handle, and a handle that isn't a session */
     CHECK(send(0x55) == 0xE401);
+    u32 ev = event_handle();
+    CHECK(send(ev) == 0xE401 && h_close(ev) == 0);
 }
 
 /* the receive list (C descriptors), as Mesosphere's ReceiveMessage places and measures it: after the raw data, or at
@@ -586,7 +617,7 @@ static void user_buffers(void) {
 static void receive_lists(u32 h, SvcObj* root) {
     static u8 before[0x1000];
     /* through the user buffer: raw data ending at 0xF8 (60 data words), two C entries at 0xF8 and 0x100, past the
-       server's 0x100 bytes. Served, with both decoded */
+       server's 0x100 bytes. Served, with both decoded, the second's address past 4 GiB */
     memset(GP(UBUF), 0, 0x1000);
     clear();
     CmifRequest r = cmif_make_request(
@@ -598,6 +629,7 @@ static void receive_lists(u32 h, SvcObj* root) {
     CHECK(send_to(h, UBUF, 0x1000) == 0);
     CHECK(got.calls == 1 && got.self == root && got.cmd == 1 && got.raw_size == 0xD0);
     CHECK(got.nc == 2 && got.c.addr == 0x5000 && got.c.size == 0x40);
+    CHECK(got.c1.addr == 0x123456000ull && got.c1.size == 0x1000);
     CmifResponse resp = cmif_parse_response(GP(UBUF), 0, 12);
     CHECK(resp.result == 0 && get32(resp.data) == 3);
 
@@ -674,7 +706,7 @@ static void failed_command(u32 h, int domain) {
     CHECK(send(h) == 0 && got.calls == 1 && got.cmd == 2);
     CHECK(events_live == events && objects_live == objects);
     for (u32 i = 0; i < 64; i++) CHECK(!handles[i] || handles[i]->type == KO_SESSION);
-    CHECK(get32(msg() + 4) == (domain ? 14u : 10u)); /* no special header, the headers and no data */
+    CHECK(get32(msg() + 4) == (domain ? 12u : 8u)); /* no special header, the padding's 16, the headers, no data */
     CmifResponse resp = cmif_parse_response(msg(), domain, 0);
     CHECK(resp.result == RC_FAIL && !resp.num_out_objects && !get32(resp.data));
     CHECK(g_ipc_ring_n == ring + 1 && !strcmp(last_ring(), "test:p cmd 2 (in 0 0) -> e05"));
@@ -691,11 +723,17 @@ static void domain_requests(u32 h, SvcObj* root) {
     CmifResponse resp = cmif_parse_response(msg(), 0, 4);
     CHECK(resp.result == 0 && get32(resp.data) == 1);
     KSession* s = (KSession*)handle_object(h);
-    CHECK(s->is_domain && s->domain && s->domain->n == 1 && s->domain->obj[0] == root);
+    CHECK(s->domain && s->domain->n == 1 && s->domain->obj[0] == root);
     /* QueryPointerBufferSize, still a control request answered plainly */
     clear();
     cmif_make_control_request(msg(), 3, 0);
-    CHECK(send(h) == 0 && cmif_parse_response(msg(), 0, 4).result == 0);
+    CHECK(send(h) == 0);
+    resp = cmif_parse_response(msg(), 0, 4);
+    CHECK(resp.result == 0 && get32(resp.data) == 0x8000);
+    /* a control command sf doesn't have: UnknownCommandId */
+    clear();
+    cmif_make_control_request(msg(), 9, 0);
+    CHECK(send(h) == 0 && cmif_parse_response(msg(), 0, 0).result == RC(10, 221));
 
     /* a request to object 1 with two in objects, both object 1 */
     clear();
@@ -709,7 +747,7 @@ static void domain_requests(u32 h, SvcObj* root) {
     CHECK(got.raw_off == 48 && get32(got.raw) == 7 && get32(got.raw + 4) == 8);
     CHECK(got.nin_objs == 2 && got.in_objs[0] == 1 && got.in_objs[1] == 1 && got.in_obj[0] == root &&
           got.in_obj[1] == root);
-    CHECK(get32(msg() + 4) == 17); /* 8 of padding, the domain and SFCO headers, 12 of data, the 16 of slack */
+    CHECK(get32(msg() + 4) == 15); /* 16 for the padding, the domain and SFCO headers, 12 of data */
     resp = cmif_parse_response(msg(), 1, 12);
     CHECK(resp.result == 0 && !resp.num_out_objects && get32(resp.data) == 15);
     CHECK(!strcmp(last_ring(), "test:p cmd 1 (in 7 8) -> 0"));
@@ -734,6 +772,19 @@ static void domain_requests(u32 h, SvcObj* root) {
     CHECK(send(h) == 0 && !got.calls && objects_live == objects - 1 && !s->domain->obj[1]);
     resp = cmif_parse_response(msg(), 1, 0);
     CHECK(resp.result == 0 && !resp.num_out_objects);
+    /* the next object out takes the freed id 2 again, and closing it frees it */
+    clear();
+    cmif_make_request(msg(), (CmifRequestFormat){.object_id = 1, .request_id = 3});
+    CHECK(send(h) == 0 && get32(cmif_parse_response(msg(), 1, 0).objects) == 2 && s->domain->obj[1]);
+    clear();
+    cmif_make_close_request(msg(), 2);
+    CHECK(send(h) == 0 && !s->domain->obj[1] && objects_live == objects - 1);
+    /* a missing object out of a domain request is id 0 */
+    clear();
+    cmif_make_request(msg(), (CmifRequestFormat){.object_id = 1, .request_id = 4});
+    CHECK(send(h) == 0);
+    resp = cmif_parse_response(msg(), 1, 0);
+    CHECK(resp.result == 0 && resp.num_out_objects == 1 && get32(resp.objects) == 0);
     /* the closed id, and one never given: TargetNotFound */
     for (u32 id = 2; id <= 9; id += 7) {
         clear();
@@ -787,6 +838,58 @@ static void domain_requests(u32 h, SvcObj* root) {
     CHECK(send(h) == 0 && !got.calls && cmif_parse_response(msg(), 1, 0).result == RC(10, 211));
 }
 
+/* the reply's data words, as the SDK's client checks them: no more than its 0x100 byte buffer, the largest replies
+   swipc allows exactly at it, and a reply built by hand that doesn't fit cut to what does */
+static void reply_sizes(void) {
+    u32 h = session_new(test_object("test:r"));
+    clear();
+    cmif_make_request(msg(), (CmifRequestFormat){.request_id = 5});
+    CHECK(send(h) == 0 && (get32(msg() + 4) & 0x3FF) == 0x3C); /* 16 + 16 + 0xD0 */
+    CmifResponse resp = cmif_parse_response(msg(), 0, 0xD0);
+    CHECK(get32(resp.data) == 0xA0000000u && get32(resp.data + 0xCC) == 0xA00000CCu);
+    /* 0x100 bytes in out[]: 0xE0 fit after the headers, the data words come to 0x100 */
+    clear();
+    cmif_make_request(msg(), (CmifRequestFormat){.request_id = 6});
+    CHECK(send(h) == 0 && (get32(msg() + 4) & 0x3FF) == 0x40);
+    resp = cmif_parse_response(msg(), 0, 0xE0);
+    CHECK(get32(resp.data + 0xDC) == 0xA00000DCu && resp.data + 0xE0 == msg() + 0x100);
+    /* two copy handles: 12 bytes of padding, the data's end exactly at the buffer's */
+    clear();
+    cmif_make_request(msg(), (CmifRequestFormat){.request_id = 7});
+    CHECK(send(h) == 0 && (get32(msg() + 4) & 0x3FF) == 0x3C);
+    resp = cmif_parse_response(msg(), 0, 0xD0);
+    CHECK(resp.hipc.num_copy_handles == 2 && resp.data + 0xD0 == msg() + 0x100);
+    CHECK(get32(resp.data + 0xCC) == 0xA00000CCu);
+    CHECK(h_close(get32(resp.hipc.copy_handles)) == 0 && h_close(get32(resp.hipc.copy_handles + 4)) == 0);
+    /* the largest domain reply swipc allows: 0xD0 bytes, data words of 0x100 */
+    clear();
+    cmif_make_control_request(msg(), 0, 0);
+    CHECK(send(h) == 0);
+    clear();
+    cmif_make_request(msg(), (CmifRequestFormat){.object_id = 1, .request_id = 5});
+    CHECK(send(h) == 0 && (get32(msg() + 4) & 0x3FF) == 0x40);
+    CHECK(get32(cmif_parse_response(msg(), 1, 0xD0).data + 0xCC) == 0xA00000CCu);
+    CHECK(h_close(h) == 0);
+}
+
+/* the crash report's ring: one entry a request, served or not, and a request whose service runs long leaves alone the
+   entry that took its slot meanwhile */
+static void ring_entries(u32 h) {
+    u32 ring = g_ipc_ring_n;
+    CHECK(send(0x55) == 0xE401 && g_ipc_ring_n == ring + 1 && strstr(last_ring(), "not a session"));
+    clear();
+    hipc_make_request(msg(), (HipcMetadata){.type = 4, .num_data_words = 0x3FF}); /* the kernel refuses it */
+    CHECK(send(h) == 0xE801 && g_ipc_ring_n == ring + 2 && strstr(last_ring(), "not served"));
+    clear();
+    cmif_make_control_request(msg(), 3, 0);
+    CHECK(send(h) == 0 && g_ipc_ring_n == ring + 3 && strstr(last_ring(), "not served"));
+    clear();
+    cmif_make_request(msg(), (CmifRequestFormat){.request_id = 8});
+    u32 slot = g_ipc_ring_n & 31;
+    CHECK(send(h) == 0 && g_ipc_ring_n == ring + 3 + 33);
+    CHECK(strstr(g_ipc_ring[slot], "cmd 8") && strstr(g_ipc_ring[slot], "-> running")); /* not rewritten */
+}
+
 /* auto_stub_ipc: a command no interface declares answers success, or the console's UnknownCommandId when it's off */
 static void undeclared_commands(void) {
     SvcObj o;
@@ -800,6 +903,98 @@ static void undeclared_commands(void) {
     CHECK(stub_ok(&o, &c) == (int)RC(10, 221));
     g_opt_auto_stub_ipc = 1;
 }
+/* ipc_warn_once: three warnings per service and command, a name told apart by its first 127 characters, and nothing
+   once its 512 entries are taken. Run last: it fills the table */
+static void warn_once(void) {
+    char a[200], b[200];
+    memset(a, 'a', 199), a[199] = 0;
+    memcpy(b, a, sizeof b), b[150] = 'b'; /* differs past the 127th character */
+    for (int i = 0; i < 3; i++) CHECK(ipc_warn_once("warn:x", 5) == 1);
+    CHECK(ipc_warn_once("warn:x", 5) == 0 && ipc_warn_once("warn:x", 5) == 0);
+    CHECK(ipc_warn_once("warn:x", 6) == 1); /* another command counts on its own */
+    CHECK(ipc_warn_once(a, 1) == 1 && ipc_warn_once(b, 1) == 1 && ipc_warn_once(a, 1) == 1);
+    CHECK(ipc_warn_once(b, 1) == 0); /* the fourth for the same 127 characters */
+    for (u32 cmd = 1000; cmd < 1600; cmd++) ipc_warn_once("warn:fill", cmd);
+    CHECK(ipc_warn_once("warn:new", 1) == 0); /* the table is full */
+}
+
+/* the control requests on a domain session: CloneCurrentObject shares the domain, closing the clone and the original
+   in either order lets go of it once; CopyFromCurrentDomain gives an object's own session */
+static void clones(void) {
+    int objects = objects_live;
+    SvcObj* root = test_object("test:c");
+    u32 h = session_new(root);
+    clear();
+    cmif_make_control_request(msg(), 0, 0);
+    CHECK(send(h) == 0);
+    Domain* d = ((KSession*)handle_object(h))->domain;
+    CHECK(d && d->refs == 1);
+    for (int order = 0; order < 2; order++) {
+        clear();
+        cmif_make_control_request(msg(), order ? 4 : 2, order ? 4 : 0); /* CloneCurrentObjectEx takes a tag */
+        CHECK(send(h) == 0);
+        CmifResponse resp = cmif_parse_response(msg(), 0, 0);
+        CHECK(resp.result == 0 && resp.hipc.num_move_handles == 1);
+        u32 ch = get32(resp.hipc.move_handles);
+        KSession* clone = (KSession*)handle_object(ch);
+        CHECK(clone && clone->domain == d && clone->obj == root && d->refs == 2);
+        /* the clone serves the domain's objects */
+        clear();
+        cmif_make_request(msg(), (CmifRequestFormat){.object_id = 1, .request_id = 1, .data_size = 8});
+        CHECK(send(ch) == 0 && got.self == root);
+        if (order) { /* the original first: the clone keeps the domain */
+            CHECK(h_close(h) == 0 && d->refs == 1 && objects_live == objects + 1);
+            h = ch;
+        } else {
+            CHECK(h_close(ch) == 0 && d->refs == 1);
+        }
+    }
+    /* CopyFromCurrentDomain: object 1's own session; an id the domain doesn't have, DomainObjectNotFound */
+    clear();
+    put32(cmif_make_control_request(msg(), 1, 4), 1);
+    CHECK(send(h) == 0);
+    CmifResponse resp = cmif_parse_response(msg(), 0, 0);
+    CHECK(resp.result == 0 && resp.hipc.num_move_handles == 1);
+    u32 own = get32(resp.hipc.move_handles);
+    KSession* os = (KSession*)handle_object(own);
+    CHECK(os && os->obj == root && !os->domain);
+    CHECK(h_close(own) == 0);
+    clear();
+    put32(cmif_make_control_request(msg(), 1, 4), 9);
+    CHECK(send(h) == 0 && cmif_parse_response(msg(), 0, 0).result == 0x3D80B);
+    CHECK(h_close(h) == 0 && objects_live == objects);
+    /* on a session that isn't a domain: TargetNotDomain */
+    root = test_object("test:c");
+    h = session_new(root);
+    clear();
+    put32(cmif_make_control_request(msg(), 1, 4), 1);
+    CHECK(send(h) == 0 && cmif_parse_response(msg(), 0, 0).result == 0x3D60B);
+    CHECK(h_close(h) == 0 && objects_live == objects);
+}
+
+/* what sf closes the session for: a message type it doesn't serve, a TIPC close, a CMIF close. The client's
+   SendSyncRequest and every later one get SessionClosed, and the crash report's ring shows them */
+static void session_closes(void) {
+    for (u32 type = 0; type < 16; type++) {
+        if (type >= 4 && type <= 7) continue;
+        int objects = objects_live;
+        u32 h = session_new(test_object("test:x"));
+        static u8 before[0x100];
+        clear();
+        hipc_make_request(msg(), (HipcMetadata){.type = type, .num_data_words = 8});
+        memcpy(before, msg(), 0x100);
+        u32 ring = g_ipc_ring_n;
+        CHECK(send(h) == 0xF601 && !got.calls && ((KSession*)handle_object(h))->closed);
+        CHECK(!memcmp(before, msg(), 0x100)); /* no reply */
+        CHECK(g_ipc_ring_n == ring + 1 && strstr(last_ring(), "not served"));
+        clear();
+        cmif_make_request(msg(), (CmifRequestFormat){.request_id = 1, .data_size = 8});
+        memcpy(before, msg(), 0x100);
+        CHECK(send(h) == 0xF601 && !got.calls && !memcmp(before, msg(), 0x100));
+        CHECK(g_ipc_ring_n == ring + 2 && strstr(last_ring(), "session closed"));
+        CHECK(h_close(h) == 0 && objects_live == objects);
+    }
+}
 
 int main(void) {
     user_buffers();
@@ -808,9 +1003,11 @@ int main(void) {
     CHECK(g_mem != NULL);
 
     undeclared_commands();
+    reply_sizes();
     SvcObj* root = test_object("test:p");
     u32 h = session_new(root);
     plain_requests(h, root);
+    ring_entries(h);
     plain_refusals(h);
     kernel_refusals(h);
     receive_lists(h, root);
@@ -818,15 +1015,18 @@ int main(void) {
     failed_command(h, 0);
     domain_requests(h, root);
     failed_command(h, 1);
-    /* a plain Close (type 2) is left to the client's svcCloseHandle */
+    clones();
+    session_closes();
+    /* a plain Close (type 2): sf closes the session, and the client then closes its handle */
     clear();
     cmif_make_close_request(msg(), 0);
-    CHECK(send(h) == 0 && !got.calls && handle_object(h));
+    CHECK(send(h) == 0xF601 && !got.calls && handle_object(h));
+    warn_once();
 
     /* closing the session lets go of the domain and every object */
     CHECK(h_close(h) == 0);
     for (u32 i = 0; i < 64; i++) CHECK(!handles[i]);
-    CHECK(objects_live == 0 && events_live == 0);
+    CHECK(objects_live == 0 && events_live == 0 && test_locks == 0);
     free(g_mem);
     printf("ipc_message: ok\n");
     return 0;

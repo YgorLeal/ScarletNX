@@ -6,6 +6,19 @@
 #ifndef SNX_GPU_H
 #define SNX_GPU_H
 #include "cpu/aarch64/cpu.h"
+/* a macro's state (mme.c), kept with its channel: a wait (gpu_park) stops the macro after the method that asked for
+   it, and it goes on (mme_resume) before the stream's next word */
+typedef struct {
+    u32 regs[8], carry;
+    u32 method, incr; /* where the next send goes, and how far it moves after */
+    u32 idx, np, pi;  /* the macro, its parameters (in the channel's mme_params) and the next one to fetch */
+    u32 pc, dpc;      /* the next instruction, and where a taken branch goes after its delay slot */
+    u32 steps;        /* instructions run, against a macro that never ends */
+    int running;      /* started and not ended: a wait stopped it */
+    int delayed;      /* a branch was taken: after the next instruction, its delay slot, pc becomes dpc */
+    int slot;         /* the next instruction is a delay slot: its exit bit doesn't count */
+    int exiting;      /* the macro ends after the next instruction, its exit's delay slot */
+} GpuMme;
 typedef struct GpuChannel {
     u32 id;
     u32 sub_class[8];
@@ -36,8 +49,14 @@ typedef struct GpuChannel {
     u32 cb_words[256];
     /* SetRenderEnable (3D 0x554-0x556) or its override (0x651) turned drawing off: draws and clears are skipped */
     int render_off;
+    /* the constant buffers bound to each stage (0x904 + 8 * stage), address and size: 3D state of this channel, which
+       another channel's binds don't change */
+    u64 cbind[5][18];
+    u32 cbind_size[5][18];
+    u32 instance_count; /* the instance the next draw is, counted by BEGIN's next-instance bit and 0x486 */
+    GpuMme mme;         /* the macro running, or one a wait stopped after the method that asked for it */
     /* what the stream waits for before its next method (gpu_park): the GPU thread runs other channels' work meanwhile,
-       as Host switches channels on a semaphore acquire that fails */
+       as the GPU's Host unit (PFIFO) switches channels on a semaphore acquire that fails */
     u32 park;      /* GPU_PARK_*, or 0 */
     u32 park_val;  /* the value compared with, or the syncpoint's threshold */
     int park_geq;  /* a semaphore reaches park_val (a wrapping compare) instead of equalling it */
@@ -83,20 +102,24 @@ void gpu_mem_written_shader(u64 gva, u64 size); /* shader writeback tracks both 
 void gpu_signal_point(void);                    /* the GPU is about to do something the game can observe */
 u32 gpu_color_bpp(u32 format); /* bytes per pixel of a color format (render targets and 2D surfaces share them) */
 
-/* gpu.c: GPFIFO submission */
+/* gpu.c: GPFIFO submission, and the GPU thread's queue */
 void gpu_init(void);
-/* queues GPFIFO entries for the GPU thread, which waits for the fence (wait_id ~0: none), runs them on channel (the
-   channel's syncpoint id), then increments the syncpoint incs times, after which it should be at expect (the fence
-   nvdrv promised) */
-void gpu_submit(u64* entries, u32 n, u32 channel, u32 incs, u32 wait_id, u32 wait_val, u32 expect);
-/* calls fn(arg) on the GPU thread once everything submitted before it has run */
-void gpu_call(void (*fn)(void*), void* arg);
+/* queues GPFIFO entries for the GPU thread, which waits for the fence (wait_id ~0: none) as the stream's first
+   method, runs them on channel (the channel's syncpoint id), then increments the syncpoint incs times, after which it
+   should be at expect (the fence nvdrv promised). The entries are u64s at any alignment. A channel's jobs run in
+   order, and another channel's may run before them while they wait (gpu_park) */
+void gpu_submit(const void* entries, u32 n, u32 channel, u32 incs, u32 wait_id, u32 wait_val, u32 expect);
+/* calls fn(arg) on the GPU thread in order with the other calls, once the jobs queued before it on channels
+   chans[0..nchans) (n at most 4) are done. Other channels' jobs, queued before or after it, don't hold it back */
+void gpu_call(void (*fn)(void*), void* arg, const u32* chans, u32 nchans);
 void gpu_channel_close(u32 channel); /* nvdrv closed the channel: a new one with the same id starts from reset */
 /* the channel's stream waits for the u32 at GPU address addr (a syncpoint's id for the syncpoint kinds) to equal val,
-   or reach it (geq), before its next method. Met already, nothing waits. Otherwise the method that asked returns,
-   the stream stops after it, and the GPU thread goes on with other channels until it's met */
+   or reach it (geq), before its next method. Met already, nothing waits. Otherwise the method that asked returns and
+   the stream stops after it (a macro after the method too, mme_resume), and the GPU thread goes on with other
+   channels until it's met */
 void gpu_park(GpuChannel* ch, u32 kind, u64 addr, u32 val, int geq);
-/* something a parked channel may wait for changed off the GPU thread (a syncpoint increment): look again. Any thread */
+/* something a parked channel may wait for changed (a syncpoint increment, on the GPU thread or off it): look again.
+   Any thread */
 void gpu_kick(void);
 extern volatile u64 g_gpu_submits;
 /* guest memory [cpu_addr, cpu_addr + len) changed without a write the host's write tracking sees: decommitted pages,
@@ -113,6 +136,8 @@ extern void (*g_gpu_mapping_end)(void);
 
 /* engines.c: the 3D engine's methods and its report semaphores */
 u64 gpu_ticks(void);
+/* mme.c: a macro a wait stopped (ch->mme.running) goes on, until it ends or waits again */
+void mme_resume(GpuChannel* ch);
 void r3d_pending_flush(void); /* instanced draws are merged into one while they come in, this sends it now */
 int r3d_pending_on(void);
 
@@ -124,7 +149,7 @@ static inline int r3d_clear_scissored(const u32* r) { return (r[0x43E] & 0x100) 
 void r3d_draw_texture(GpuChannel* ch); /* DRAW_TEXTURE (3D 0x420-0x42B) */
 void r3d_draw(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count, u32 base_vertex, u32 base_instance,
               u32 instances);
-void r3d_cb_bind(GpuChannel* ch, int stage, u32 v);
+void r3d_cb_bind(GpuChannel* ch, int stage, u32 v); /* records the binding in ch->cbind */
 void r3d_const_upload(GpuChannel* ch, u32 v, int last);
 void r3d_const_flush(GpuChannel* ch); /* writes the constant buffer data r3d_const_upload is holding */
 int r3d_blit(const Surf2D* s, const Surf2D* d, int dx, int dy, int dw, int dh, double sx, double sy, double sdx,

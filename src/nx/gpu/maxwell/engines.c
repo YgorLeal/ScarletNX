@@ -8,7 +8,6 @@
 
 /* ============================================================ Maxwell 3D */
 #define R3(i) (ch->r3d[i])
-static u32 g_instance_count;
 /* instancing comes in as N BEGIN/END pairs with the next-instance bit. we accumulate them and emit
    one draw of N instances once something else shows up */
 static struct {
@@ -125,7 +124,7 @@ void maxwell3d_method(GpuChannel* ch, u32 m, u32 v, int last) {
         if (ch->mme_nparams < 0x10000) ch->mme_params[ch->mme_nparams++] = v;
         if (last) {
             ch->mme_active = 0;
-            mme_run(ch, ch->mme_index, ch->mme_params, ch->mme_nparams);
+            mme_run(ch, ch->mme_index, ch->mme_nparams);
             ch->mme_nparams = 0;
         }
         return;
@@ -186,15 +185,15 @@ void maxwell3d_method(GpuChannel* ch, u32 m, u32 v, int last) {
                 bi = R3(0x50E);
             if (g_pd.on && g_pd.ch == ch && ((R3(0x586) >> 26) & 1) && g_pd.indexed == idx && g_pd.topo == topo &&
                 g_pd.first == first && g_pd.count == count && g_pd.bv == bv && g_pd.bi == bi) {
-                g_pd.inst = g_instance_count + 1;
+                g_pd.inst = ch->instance_count + 1;
             } /* one more instance */
             else {
-                if (g_instance_count) { /* a draw at instance N that doesn't merge is sent as instances 0..N */
+                if (ch->instance_count) { /* a draw at instance N that doesn't merge is sent as instances 0..N */
                     LOG_LIMIT(
                         4,
                         "gpu: draw at instance %u doesn't continue the one before (topology %x, first %u, count %u), "
                         "drawn as %u instances\n",
-                        g_instance_count, topo, first, count, g_instance_count + 1);
+                        ch->instance_count, topo, first, count, ch->instance_count + 1);
                 }
                 r3d_pending_flush();
                 g_pd.on = 1;
@@ -205,7 +204,7 @@ void maxwell3d_method(GpuChannel* ch, u32 m, u32 v, int last) {
                 g_pd.count = count;
                 g_pd.bv = bv;
                 g_pd.bi = bi;
-                g_pd.inst = g_instance_count + 1;
+                g_pd.inst = ch->instance_count + 1;
             }
             /* hw consumes the counts on each draw; if we don't, the next non-indexed draw picks up stale indices */
             R3(0x5F8) = 0;
@@ -217,17 +216,17 @@ void maxwell3d_method(GpuChannel* ch, u32 m, u32 v, int last) {
                          topology 28-31 */
             u32 first = v & 0xFFFF, count = (v >> 16) & 0xFFF, topo = (v >> 28) & 0xF, bi = R3(0x50E);
             if (m == 0x485)
-                g_instance_count = 0;
+                ch->instance_count = 0;
             else
-                g_instance_count++;
+                ch->instance_count++;
             if (m == 0x486 && g_pd.on && g_pd.ch == ch && !g_pd.indexed && g_pd.topo == topo && g_pd.first == first &&
                 g_pd.count == count && g_pd.bv == 0 && g_pd.bi == bi) {
-                g_pd.inst = g_instance_count + 1; /* one more instance */
+                g_pd.inst = ch->instance_count + 1; /* one more instance */
                 break;
             }
-            if (g_instance_count) /* like END: what doesn't continue the draw before is drawn as instances 0..N */
+            if (ch->instance_count) /* like END: what doesn't continue the draw before is drawn as instances 0..N */
                 LOG_LIMIT(4, "gpu: instanced array draw at instance %u doesn't continue the one before, drawn as %u\n",
-                          g_instance_count, g_instance_count + 1);
+                          ch->instance_count, ch->instance_count + 1);
             r3d_pending_flush();
             g_pd.on = 1;
             g_pd.ch = ch;
@@ -237,14 +236,14 @@ void maxwell3d_method(GpuChannel* ch, u32 m, u32 v, int last) {
             g_pd.count = count;
             g_pd.bv = 0;
             g_pd.bi = bi;
-            g_pd.inst = g_instance_count + 1;
+            g_pd.inst = ch->instance_count + 1;
             break;
         }
         case 0x586: /* BEGIN, bit 26 = next instance */
             if (v & (1u << 26))
-                g_instance_count++;
+                ch->instance_count++;
             else if (!(v & (1u << 27)))
-                g_instance_count = 0;
+                ch->instance_count = 0;
             break;
         case 0x8E4:
         case 0x8E5:

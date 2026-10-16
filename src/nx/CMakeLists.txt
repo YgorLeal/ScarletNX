@@ -158,8 +158,15 @@ if(BUILD_TESTING AND SNX_TEST_VULKAN)
     set_tests_properties(vulkan_headless PROPERTIES TIMEOUT 60
         FAIL_REGULAR_EXPRESSION "vulkan validation:;failed: VK_ERROR")
 endif()
+if(BUILD_TESTING)
+    snx_test_sanitize(snx_shader) # tests/CMakeLists.txt: made after it looked
+    snx_sanitizer_path()          # this folder's tests
+endif()
 
-if(SNX_DEPLOY)
+# a sanitized build (SNX_TEST_SANITIZERS) is a test build, its runtime instrumented: it doesn't go next to the games
+if(SNX_DEPLOY AND SNX_TEST_SANITIZERS AND BUILD_TESTING)
+    message(STATUS "SNX_TEST_SANITIZERS: the runtime is not deployed to ${SNX_GAMES_DIR}")
+elseif(SNX_DEPLOY)
     add_custom_command(TARGET scarletnx POST_BUILD
         COMMAND "${CMAKE_COMMAND}" "-DRUNTIME=$<TARGET_FILE:scarletnx>" "-DGAMES=${SNX_GAMES_DIR}" "-DWINDOWS=${WIN32}"
                 -P "${CMAKE_SOURCE_DIR}/cmake/deploy.cmake"
