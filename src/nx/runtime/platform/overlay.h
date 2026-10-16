@@ -39,6 +39,14 @@ int overlay_listening(void);
 void overlay_press(int control);
 /* a tap at x, y on a picture of sw x sh: what it did, OVERLAY_CLOSE outside the panel */
 int overlay_tap(float x, float y, int sw, int sh);
+/* a finger or the mouse (touch.h's SNX_TOUCH_MOUSE) on the open menu, at x, y in the picture's pixels: down on an
+   on-screen control it is the controls', whose presses move the menu (overlay_controls); else its lift taps the menu
+   where it lifts (what that did). Reset forgets the one down, which lifts without a tap; cancel forgets id's */
+void overlay_pointer_down(u64 id, float x, float y, const int safe[4]);
+void overlay_pointer_move(u64 id, float x, float y, const int safe[4]);
+int overlay_pointer_up(u64 id, float x, float y, int sw, int sh);
+void overlay_pointer_cancel(u64 id);
+void overlay_pointers_reset(void);
 void overlay_draw(SnxUiList* l, int sw, int sh);
 /* a fatal error's panel (backend/sdl3.c), the menu's own: the head, the game's name, the error, what it means and what to
    do, cut to its width, and Close in focus */

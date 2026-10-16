@@ -365,6 +365,23 @@ int overlay_tap(float x, float y, int sw, int sh) {
     if (arrows(setting(i))) return act(i, col < OVERLAY_COLS - 5 ? -1 : 1);
     return act(i, 0);
 }
+static u64 tap_id;   /* what went down off the on-screen controls, */
+static int tap_down; /* whose lift taps the menu */
+void overlay_pointer_down(u64 id, float x, float y, const int safe[4]) {
+    if (vpad_down(id, x, y, safe)) return;
+    tap_id = id;
+    tap_down = 1;
+}
+void overlay_pointer_move(u64 id, float x, float y, const int safe[4]) { vpad_move(id, x, y, safe); }
+int overlay_pointer_up(u64 id, float x, float y, int sw, int sh) {
+    if (vpad_up(id) || !tap_down || id != tap_id) return OVERLAY_NONE;
+    tap_down = 0;
+    return overlay_tap(x, y, sw, sh);
+}
+void overlay_pointer_cancel(u64 id) {
+    if (id == tap_id) tap_down = 0;
+}
+void overlay_pointers_reset(void) { tap_down = 0; }
 /* the gamepads' page's second row: the first one connected by name, and how many more */
 static const char* pads_hint(char* out, size_t size) {
     int more = 0;

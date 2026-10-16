@@ -5,6 +5,7 @@
 #include "runtime/platform/overlay.h"
 #include "runtime/platform/backend.h"
 #include "runtime/platform/gamepad.h"
+#include "runtime/platform/touch.h"
 #include "runtime/platform/vpad.h"
 #include "runtime/platform/controls_atlas.h"
 #include "runtime/platform/plat.h"
@@ -274,6 +275,35 @@ int main(void) {
         overlay_toggle(); /* B still held as it opens */
         assert(overlay_controls(1ull << 1, still, 3005) == OVERLAY_NONE);
         assert(overlay_controls(0, still, 3006) == OVERLAY_NONE);
+        /* a finger or the mouse on the open menu: down on an on-screen control it is the controls', whose D-pad then
+           moves the menu and whose lift elsewhere taps nothing; off them its lift taps the menu, outside the panel
+           closing it; one the menu forgot (it opened, the window lost the focus) or the system cancelled taps nothing */
+        {
+            const int area[4] = {0, 0, SW, SH};
+            const SnxVpadConfig* v = vpad_config();
+            float dx = v->at[SNX_VPAD_DPAD].x * SW, dy = v->at[SNX_VPAD_DPAD].y * SH + 0.6f * 0.25f * SH / 2;
+            u64 b;
+            i32 st[4];
+            assert(vpad_ini("controls", "1"));
+            overlay_pointer_down(SNX_TOUCH_MOUSE, dx, dy, area);
+            vpad_state(&b, st);
+            assert(b == 1ull << 15 && overlay_controls(b, still, 4000) == OVERLAY_NONE); /* to Controllers */
+            assert(overlay_pointer_up(SNX_TOUCH_MOUSE, 5, 5, SW, SH) == OVERLAY_NONE && overlay_shown());
+            vpad_state(&b, st);
+            assert(!b && overlay_controls(1ull << 0, still, 4001) == OVERLAY_NONE);
+            draw();
+            assert(text_at(1, 0, "SCARLETNX  /  CONTROLLERS"));
+            assert(overlay_controls(1ull << 1, still, 4002) == OVERLAY_NONE); /* B: the menu */
+            overlay_pointer_down(8, 5, 5, area);
+            assert(overlay_pointer_up(8, 5, 5, SW, SH) == OVERLAY_CLOSE);
+            overlay_pointer_down(9, 5, 5, area);
+            overlay_pointers_reset();
+            assert(overlay_pointer_up(9, 5, 5, SW, SH) == OVERLAY_NONE);
+            overlay_pointer_down(10, 5, 5, area);
+            overlay_pointer_cancel(10);
+            assert(overlay_pointer_up(10, 5, 5, SW, SH) == OVERLAY_NONE);
+            assert(vpad_ini("controls", "0"));
+        }
     }
 
     /* the controllers' page: the ones connected, A B X Y by label or position, the dead zone by fives, the

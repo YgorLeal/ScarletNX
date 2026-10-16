@@ -550,8 +550,6 @@ static void hotkey(SDL_Keycode k) {
 /* The game's menu takes the keys, the buttons, the fingers and the mouse while it is open. Back, Home and F2 open
    and close it, and they and Esc end the on-screen controls' edit mode. Under ui_lock: the renderer draws them on its
    thread */
-static u64 g_tap_finger;     /* the finger that went down on the open menu (0, which SDL never uses, for none) */
-static int g_tap_mouse_down; /* and the mouse's left button: only their lifts tap it */
 /* a finger's id, the pen's apart: SDL gives a pen's touch the id 1 on every platform, the id Android and Wayland
    give a first finger and any finger may have, and no real finger's id sets bit 63 */
 static u64 finger_id(const SDL_TouchFingerEvent* f) {
@@ -562,8 +560,7 @@ static void menu_open(int open) {
     vpad_release();
     keys_held = 0;
     /* a finger or button down before this (Home on the on-screen controls opened it) lifts without a tap */
-    g_tap_finger = 0;
-    g_tap_mouse_down = 0;
+    overlay_pointers_reset();
 }
 static void overlay_do(int action) {
     if (action == OVERLAY_EXIT) g_quit = 1;
@@ -614,35 +611,39 @@ static int menu_event(const SDL_Event* e) {
         overlay_press(e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ? SNX_PAD_LT : SNX_PAD_RT);
     } else if (e->type == SDL_EVENT_MOUSE_WHEEL) { /* a notch up is a row up, as the system turns the wheel */
         overlay_scroll(-e->wheel.integer_y);
-    } else if (e->type == SDL_EVENT_FINGER_DOWN || e->type == SDL_EVENT_FINGER_MOTION) {
+    } else if (e->type == SDL_EVENT_FINGER_DOWN || e->type == SDL_EVENT_FINGER_MOTION ||
+               e->type == SDL_EVENT_FINGER_UP) {
+        /* a finger on an on-screen control stays the controls': their presses move the menu */
         int safe[4];
+        float x, y;
         backend_window_size(&w, &h);
         backend_window_safe(&safe[0], &safe[1], &safe[2], &safe[3]);
-        /* a finger on an on-screen control stays the controls': their presses move the menu (menu_vpad) */
-        if (e->type == SDL_EVENT_FINGER_MOTION)
-            vpad_move(finger_id(&e->tfinger), e->tfinger.x * (float)w, e->tfinger.y * (float)h, safe);
-        else if (!vpad_down(finger_id(&e->tfinger), e->tfinger.x * (float)w, e->tfinger.y * (float)h, safe))
-            g_tap_finger = finger_id(&e->tfinger);
-    } else if (e->type == SDL_EVENT_FINGER_UP && vpad_up(finger_id(&e->tfinger))) {
-        /* the controls' finger lifted: no tap */
-    } else if (e->type == SDL_EVENT_FINGER_UP) {
-        if (g_tap_finger && finger_id(&e->tfinger) == g_tap_finger) {
-            g_tap_finger = 0;
-            backend_window_size(&w, &h);
-            overlay_do(overlay_tap(e->tfinger.x * (float)w, e->tfinger.y * (float)h, w, h));
-        }
-    } else if ((e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_MOUSE_BUTTON_UP) &&
-               e->button.which != SDL_TOUCH_MOUSEID && e->button.button == SDL_BUTTON_LEFT) {
+        x = e->tfinger.x * (float)w;
+        y = e->tfinger.y * (float)h;
+        if (e->type == SDL_EVENT_FINGER_DOWN)
+            overlay_pointer_down(finger_id(&e->tfinger), x, y, safe);
+        else if (e->type == SDL_EVENT_FINGER_MOTION)
+            overlay_pointer_move(finger_id(&e->tfinger), x, y, safe);
+        else
+            overlay_do(overlay_pointer_up(finger_id(&e->tfinger), x, y, w, h));
+    } else if (((e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_MOUSE_BUTTON_UP) &&
+                e->button.which != SDL_TOUCH_MOUSEID && e->button.button == SDL_BUTTON_LEFT) ||
+               (e->type == SDL_EVENT_MOUSE_MOTION && e->motion.which != SDL_TOUCH_MOUSEID)) {
+        /* the mouse's left button as one more finger, as touch_mouse makes it while the menu is closed */
+        int safe[4];
+        float x = e->type == SDL_EVENT_MOUSE_MOTION ? e->motion.x : e->button.x,
+              y = e->type == SDL_EVENT_MOUSE_MOTION ? e->motion.y : e->button.y;
+        backend_window_size(&w, &h);
+        backend_window_safe(&safe[0], &safe[1], &safe[2], &safe[3]);
+        d = SDL_GetWindowPixelDensity(g_win);
         if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN)
-            g_tap_mouse_down = 1;
-        else if (g_tap_mouse_down) {
-            g_tap_mouse_down = 0;
-            backend_window_size(&w, &h);
-            d = SDL_GetWindowPixelDensity(g_win);
-            overlay_do(overlay_tap(e->button.x * d, e->button.y * d, w, h));
-        }
+            overlay_pointer_down(SNX_TOUCH_MOUSE, x * d, y * d, safe);
+        else if (e->type == SDL_EVENT_MOUSE_MOTION)
+            overlay_pointer_move(SNX_TOUCH_MOUSE, x * d, y * d, safe);
+        else
+            overlay_do(overlay_pointer_up(SNX_TOUCH_MOUSE, x * d, y * d, w, h));
     } else if (e->type == SDL_EVENT_FINGER_CANCELED) {
-        if (finger_id(&e->tfinger) == g_tap_finger) g_tap_finger = 0;
+        overlay_pointer_cancel(finger_id(&e->tfinger));
         return 0; /* the game's touch screen lets it go too */
     } else if (e->type != SDL_EVENT_FINGER_MOTION && e->type != SDL_EVENT_MOUSE_BUTTON_DOWN &&
                e->type != SDL_EVENT_MOUSE_BUTTON_UP && e->type != SDL_EVENT_MOUSE_MOTION)
@@ -780,8 +781,7 @@ void video_poll(void) {
                 keys_held = 0;
                 ui_lock();
                 vpad_release();
-                g_tap_finger = 0; /* lifts that come without their presses don't tap the menu */
-                g_tap_mouse_down = 0;
+                overlay_pointers_reset(); /* lifts that come without their presses don't tap the menu */
                 ui_unlock();
                 /* SDL leaves a held mouse button to the system's implicit grab, whose release may go to the window
                    that took the focus: the game's touch from the mouse lifts now (a later release finds it up) */
